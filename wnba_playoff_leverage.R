@@ -33,6 +33,46 @@ sqlf<-function(x) {
 }
 
 # =====================================================================
+# House style - the evollve graphics tokens, set in Open Sans
+# =====================================================================
+INK      <- "#22211e"   # primary text
+INK_SOFT <- "#6f6b64"   # secondary text
+RULE     <- "#d9d6d0"
+STRIPE   <- "#f4f3f0"
+PAPER    <- "#ffffff"
+ACCENT   <- "#3b6ea5"
+
+# Open Sans is a webfont, so if this machine doesn't have it, fetch it once into a cache
+# beside the graphics and register it (SIL Open Font License). A family R can't find
+# falls back to the device default silently, so say so.
+FONT_FAMILY <- "Open Sans"
+FONT_URLS   <- c(plain = "https://raw.githubusercontent.com/googlefonts/opensans/main/fonts/ttf/OpenSans-Regular.ttf",
+                 bold  = "https://raw.githubusercontent.com/googlefonts/opensans/main/fonts/ttf/OpenSans-Bold.ttf")
+font_found <- function(fam) tolower(fam) %in% tolower(c(systemfonts::system_fonts()$family,
+                                                        systemfonts::registry_fonts()$family))
+if (!font_found(FONT_FAMILY)) {
+  font_files <- file.path(path.expand(out_dir), "fonts", basename(FONT_URLS))
+  dir.create(dirname(font_files[1]), showWarnings = FALSE, recursive = TRUE)
+  for (i in seq_along(FONT_URLS)) if (!file.exists(font_files[i]))
+    try(download.file(FONT_URLS[i], font_files[i], mode = "wb", quiet = TRUE), silent = TRUE)
+  if (all(file.exists(font_files) & file.size(font_files) > 50000))   # not an error page
+    systemfonts::register_font(FONT_FAMILY, plain = font_files[1], bold = font_files[2])
+}
+FONT <- if (font_found(FONT_FAMILY)) FONT_FAMILY else ""
+if (!nzchar(FONT)) message("Open Sans not found or fetched - graphics use the device default font")
+update_geom_defaults("text", list(family = FONT))   # geom_text doesn't inherit the theme font
+
+# A plot pane can refuse a registered font ("invalid font type") that the PNG device
+# renders fine. The preview is a convenience and the .png is the deliverable.
+preview <- function(plot) tryCatch(print(plot), error = function(e)
+  message("Preview skipped (", conditionMessage(e), ") - the .png is unaffected"))
+
+# ragg sees registered fonts; the default png device may not
+save_png <- function(plot, file, width, height, dpi = 300)
+  ggsave(paste0(out_dir, file), plot, width = width, height = height, dpi = dpi, bg = PAPER,
+         device = if (requireNamespace("ragg", quietly = TRUE)) ragg::agg_png else "png")
+
+# =====================================================================
 # 1. Series probabilities for every format the WNBA has used (Bo1/3/5/7)
 #    (replaces series_win.RData, which only covered NBA formats)
 #    Perspective = "top seed" = home team in Game 1 of the series. With
@@ -265,9 +305,8 @@ summary(shots$champ_prob_change)
 bigshots    <- shots %>% arrange(desc(champ_prob_change)) %>% slice_head(n=n_shots)
 bigshots_kl <- shots %>% arrange(desc(champ_prob_kl)) %>% slice_head(n=n_shots)
 
-library(ggplot2)
-library(dplyr)
 library(scales)
+library(magick)
 
 # =====================================================================
 # Leverage grid - current WNBA format (2025+: Bo3 / Bo5 / Bo7)
@@ -283,19 +322,19 @@ leverage <- cur_fmt %>%
          champ_prob_loss = series_prob_loss * 0.5^rounds_after,
          champ_swing     = champ_prob_win - champ_prob_loss)
 
-leverage |>
+LEVERAGE_RAMP <- c("#f1f5fa", "#c6d6ea", "#8eaed3", ACCENT, "#22446b")   # one hue, light -> dark
+
+leverage_grid <- leverage |>
   mutate(round_name = factor(round_name, levels = cur_fmt$round_name)) |>
   ggplot(aes(x = wins, y = opp_wins, fill = champ_swing)) +
-  geom_tile(color = "white", linewidth = 1.1) +
+  geom_tile(color = PAPER, linewidth = 1.1) +
   geom_text(aes(label = percent(champ_swing, accuracy = 0.1),
                 color = champ_swing > 0.5),
-            size = 3.1, fontface = "bold") +
+            size = 9 / .pt, fontface = "bold") +
   facet_wrap(~ round_name, nrow = 1, scales = "free") +
-  scale_fill_gradientn(
-    colours = c("#fff5eb", "#fdbe85", "#fd8d3c", "#e6550d", "#a63603"),
-    labels = percent, limits = c(0, 1), name = "Title-odds\nswing"
-  ) +
-  scale_color_manual(values = c(`TRUE` = "white", `FALSE` = "grey20"), guide = "none") +
+  scale_fill_gradientn(colours = LEVERAGE_RAMP, labels = percent, limits = c(0, 1),
+                       name = "Title-odds\nswing") +
+  scale_color_manual(values = c(`TRUE` = PAPER, `FALSE` = INK), guide = "none") +
   scale_x_continuous(breaks = 0:3, expand = c(0, 0)) +
   scale_y_continuous(breaks = 0:3, expand = c(0, 0)) +
   labs(
@@ -304,18 +343,25 @@ leverage |>
     x = "Your wins in the series", y = "Opponent wins",
     caption = "A winner-take-all game doubles in value each round: 25% → 50% → 100%"
   ) +
-  theme_minimal(base_size = 12) +
+  theme_minimal(base_size = 12, base_family = FONT) +
   theme(
     aspect.ratio  = 1,
-    plot.title    = element_text(face = "bold", size = 15),
-    plot.subtitle = element_text(color = "grey35", size = 10, margin = margin(b = 8)),
-    plot.caption  = element_text(color = "grey45", hjust = 0),
+    text          = element_text(colour = INK),
+    axis.text     = element_text(colour = INK_SOFT),
+    axis.title    = element_text(colour = INK_SOFT, size = 10),
+    legend.text   = element_text(colour = INK_SOFT, size = 9),
+    legend.title  = element_text(colour = INK_SOFT, size = 9, margin = margin(b = 8)),
+    plot.title    = element_text(face = "bold", size = 17, margin = margin(b = 4)),
+    plot.subtitle = element_text(colour = INK_SOFT, size = 10.5, margin = margin(b = 10)),
+    plot.caption  = element_text(colour = INK_SOFT, size = 9, hjust = 0, margin = margin(t = 10)),
+    plot.title.position = "plot", plot.caption.position = "plot",
     panel.grid    = element_blank(),
-    strip.text    = element_text(face = "bold", size = 11),
-    plot.background = element_rect(fill = "white", color = NA)
+    strip.text    = element_text(face = "bold", size = 11, colour = INK),
+    plot.background = element_rect(fill = PAPER, colour = NA),
+    plot.margin   = margin(18, 18, 12, 18)
   )
-
-ggsave(paste0(out_dir, "wnba_championship_leverage.png"), width = 12, height = 4.2, dpi = 300)
+preview(leverage_grid)
+save_png(leverage_grid, "wnba_championship_leverage.png", width = 11.2, height = 4.4)
 
 library(gt)
 
@@ -342,30 +388,42 @@ tbl_gt <- gt(tbl) |>
     champ_swing     = "Swing"
   ) |>
   fmt_percent(c(champ_prob_win, champ_prob_loss, champ_swing), decimals = 1) |>
-  data_color(
-    columns = champ_swing,
-    fn = scales::col_numeric(c("#fff5eb", "#fd8d3c", "#a63603"), domain = c(0, 1))
-  ) |>
-  tab_style(style = cell_text(color = "#1a7a1a"), locations = cells_body(champ_prob_win)) |>
-  tab_style(style = cell_text(color = "#b22222"), locations = cells_body(champ_prob_loss)) |>
+  data_color(columns = champ_swing, fn = scales::col_numeric(LEVERAGE_RAMP, domain = c(0, 1))) |>
+  tab_style(style = cell_text(color = INK_SOFT), locations = cells_body(c(rank, champ_prob_loss))) |>
   tab_style(style = cell_text(weight = "bold"),  locations = cells_body(c(rank, champ_swing))) |>
+  tab_style(style = cell_text(color = INK_SOFT), locations = cells_column_labels()) |>
+  tab_style(style = cell_text(color = INK_SOFT), locations = cells_title("subtitle")) |>
   cols_align("center", c(rank, game, score, champ_prob_win, champ_prob_loss, champ_swing)) |>
   cols_align("left", round) |>
   tab_source_note(md("*Swing = P(champion | win this game) − P(champion | lose this game)*")) |>
   opt_row_striping() |>
+  opt_table_font(font = list(google_font(FONT_FAMILY), default_fonts())) |>
   tab_options(
+    table.font.color = INK,
     table.font.size = px(13),
     data_row.padding = px(4),
+    heading.align = "left",
     heading.title.font.size = px(18),
-    column_labels.font.weight = "bold"
+    column_labels.font.weight = "bold",
+    row.striping.background_color = STRIPE,
+    table.border.top.color = PAPER,
+    heading.border.bottom.color = RULE,
+    column_labels.border.bottom.color = RULE,
+    table_body.hlines.color = PAPER,
+    table_body.border.bottom.color = RULE
   )
 
 gtsave(tbl_gt, paste0(out_dir, "wnba_championship_leverage_table.png"))     # needs webshot2 + Chrome
 
 # =====================================================================
-# Biggest shots chart (simple version, ranked by KL)
+# Biggest-shots boards
+#   Drawn entirely inside one panel measured in inches (the evollve board
+#   approach), with the text column and the gutters either side of the 0-100%
+#   track sized from the measured width of the actual labels - so no label can
+#   run into another, however long a name or score line is.
 # =====================================================================
-bar_col <- "#e6701a"
+ROUND_TXT <- c(Finals = "Finals", SF = "Semifinals", CF = "Conf. Finals", CSF = "Conf. Semis",
+               R1 = "Round 1", R2 = "Round 2")
 
 # Row labels, all from the shooter's side: series record going into the game, score before -> after.
 # The WNBA played two 20-minute halves through 2005, but wpg numbers those periods like quarters
@@ -383,122 +441,191 @@ shot_labels <- function(d) d |>
     clock  = ifelse(secs < 60, sprintf("0:%04.1f", secs),
                     sprintf("%d:%02d", as.integer(secs %/% 60), as.integer(floor(secs %% 60)))),
     game   = top_seed_sitch + bottom_seed_sitch + 1,
-    series = paste0(shooter_wins, "–", opp_wins),
+    series = case_when(shooter_wins >  opp_wins ~ paste0("up ",   shooter_wins, "–", opp_wins),
+                       shooter_wins <  opp_wins ~ paste0("down ", shooter_wins, "–", opp_wins),
+                       TRUE                     ~ paste0("tied ", shooter_wins, "–", opp_wins)),
+    stage  = case_when(best_of == 1 ~ ROUND_TXT[round_lab],
+                       game == 1    ~ paste0(ROUND_TXT[round_lab], " G1"),
+                       TRUE         ~ paste0(ROUND_TXT[round_lab], " G", game, ", ", series)),
     score  = paste0(shooter_pts - shot_pts, "–", opp_pts, " → ", shooter_pts, "–", opp_pts),
-    l1 = paste0(rank, ".  ", fnm, " ", lnm, "   ·   ", yr),
-    l2 = paste0(round_lab, " G", game, " (", series, ")  ·  ", period, " ", clock, "  ·  ", score),
-    yn = rev(rank)
+    name   = paste(fnm, lnm),
+    detail = paste0(yr, " ", stage, "  ·  ", period, " ", clock, "  ·  ", score)
   )
 
+# ---- Headshots --------------------------------------------------------------
+# An override if the player has one, else the WNBA CDN by player id. The CDN answers
+# a player it has no photo for with a generic silhouette, so a download identical to
+# the one it serves for a nonexistent id counts as missing, and a missing headshot
+# gets an initials tile. Downloads are cached in out_dir/headshots (delete a file to
+# re-fetch it). A missing headshot is cosmetic, so nothing here stops the script.
+HEADSHOT_URL <- "https://cdn.wnba.com/headshots/wnba/latest/1040x760/%s.png"
+# Players the CDN has no photo for: image URL or local file, keyed by pid1
+# (pid1 = the WNBA/stats.wnba.com person id; ESPN's ids differ).
+headshot_overrides <- c(
+  "200674" = "https://a.espncdn.com/i/headshots/wnba/players/full/680.png",   # Sophia Young-Malcolm
+  "100639" = "https://a.espncdn.com/i/headshots/wnba/players/full/312.png",   # Deanna Nolan
+  "100396" = "https://a.espncdn.com/i/headshots/wnba/players/full/9.png"      # DeLisha Milton-Jones
+)
+
+headshot_dir <- file.path(path.expand(out_dir), "headshots")
+dir.create(headshot_dir, showWarnings = FALSE, recursive = TRUE)
+fetch_image <- function(src, dest) {
+  if (file.exists(src)) return(src)                                  # a local file
+  if (!file.exists(dest)) try(download.file(src, dest, mode = "wb", quiet = TRUE), silent = TRUE)
+  if (file.exists(dest) && file.size(dest) > 1000) return(dest)     # smaller = an error page
+  unlink(dest)
+  NA_character_
+}
+cdn_silhouette <- fetch_image(sprintf(HEADSHOT_URL, "0"), file.path(headshot_dir, "cdn_silhouette.png"))
+headshot_path <- function(pid) {
+  pid  <- as.character(pid)
+  over <- unname(headshot_overrides[pid])
+  if (!is.na(over)) {
+    path <- fetch_image(over, file.path(headshot_dir, paste0(pid, "_override.", tools::file_ext(over))))
+    if (!is.na(path)) return(path)
+  }
+  path <- fetch_image(sprintf(HEADSHOT_URL, pid), file.path(headshot_dir, paste0(pid, ".png")))
+  if (!is.na(path) && !is.na(cdn_silhouette) &&
+      unname(tools::md5sum(path)) == unname(tools::md5sum(cdn_silhouette))) return(NA_character_)
+  path
+}
+read_headshot <- function(path) {
+  if (is.na(path)) return(NULL)
+  tryCatch(as.raster(image_trim(image_read(path)[1])), error = function(e) NULL)
+}
+
+# ---- Board ------------------------------------------------------------------
+# width in inches of each string as drawn - systemfonts measures the actual font
+text_in <- function(x, pt, bold = FALSE)
+  systemfonts::string_width(x, family = FONT, size = pt, bold = bold, res = 72) / 72
+pt <- function(x) x / .pt                                            # font points -> geom_text size
+
+# d: one row per shot, ranked, with shot_labels() columns plus value_label.
+# Returns list(plot, width, height) in inches, so the PNG is drawn at exactly that size.
+shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE) {
+  n <- nrow(d)
+  M <- 0.45; ROW_H <- 0.84; TOP <- 1.55; BOTTOM <- 1.05; TRACK_W <- 4.4
+  HS_H <- 0.74; HS_W <- 1.02                                          # headshot box
+  sz <- list(rank = 20, name = 14.5, detail = 10.5, pre = 10, post = 11.5, value = 13,
+             head = 10.5, axis = 10, title = 22, sub = 12, cap = 9)
+
+  x_rank <- M + text_in("10", sz$rank, TRUE)                          # rank numbers right-aligned here
+  x_hs   <- x_rank + 0.2 + HS_W / 2
+  x_text <- if (headshots) x_hs + HS_W / 2 + 0.2 else x_rank + 0.3
+  text_w <- max(text_in(d$name, sz$name, TRUE), text_in(d$detail, sz$detail))
+  x0     <- x_text + text_w + text_in("100.0%", sz$pre) + 0.3         # 0% sits past the widest pre label
+  x1     <- x0 + TRACK_W                                              # 100%
+  val_w  <- max(text_in(c(d$value_label, value_head), sz$value, TRUE))
+  W      <- max(x1 + text_in("100.0%", sz$post, TRUE) + 0.35 + val_w + M,
+                text_in(title, sz$title, TRUE) + 2 * M, text_in(subtitle, sz$sub) + 2 * M)
+  x_val  <- W - M                                                     # values right-aligned here
+  H      <- TOP + n * ROW_H + BOTTOM
+
+  d <- d |> mutate(y = H - TOP - (rank - 0.5) * ROW_H,
+                   x_pre = x0 + champ_prob_win_pre * TRACK_W, x_post = x0 + champ_prob_win_post * TRACK_W)
+  rows_top <- H - TOP; rows_bot <- H - TOP - n * ROW_H
+  grid <- tibble(p = seq(0, 1, 0.25), x = x0 + p * TRACK_W)
+
+  g <- ggplot(d) +
+    geom_rect(data = filter(d, rank %% 2 == 0),
+              aes(xmin = M - 0.15, xmax = W - M + 0.15, ymin = y - ROW_H / 2, ymax = y + ROW_H / 2),
+              fill = STRIPE) +
+    geom_segment(data = grid, aes(x = x, xend = x, y = rows_bot, yend = rows_top),
+                 colour = RULE, linewidth = 0.35) +
+    geom_text(data = grid, aes(x = x, y = rows_bot - 0.2, label = percent(p)),
+              size = pt(sz$axis), colour = INK_SOFT, vjust = 1) +
+    geom_text(aes(x = x_rank, y = y, label = rank), hjust = 1, size = pt(sz$rank),
+              fontface = "bold", colour = INK_SOFT) +
+    geom_text(aes(x = x_text, y = y + 0.13, label = name), hjust = 0, size = pt(sz$name),
+              fontface = "bold", colour = INK) +
+    geom_text(aes(x = x_text, y = y - 0.17, label = detail), hjust = 0, size = pt(sz$detail),
+              colour = INK_SOFT) +
+    geom_segment(aes(x = x_pre, xend = x_post, y = y, yend = y),
+                 colour = ACCENT, linewidth = 2.2, lineend = "round") +
+    geom_point(aes(x = x_pre, y = y), shape = 21, size = 3.6, stroke = 1.4, fill = PAPER, colour = ACCENT) +
+    geom_point(aes(x = x_post, y = y), shape = 21, size = 5, stroke = 1.1, fill = ACCENT, colour = PAPER) +
+    geom_text(aes(x = x_pre - 0.14, y = y, label = percent(champ_prob_win_pre, 0.1)),
+              hjust = 1, size = pt(sz$pre), colour = INK_SOFT) +
+    geom_text(aes(x = x_post + 0.15, y = y, label = percent(champ_prob_win_post, 0.1)),
+              hjust = 0, size = pt(sz$post), fontface = "bold", colour = INK) +
+    geom_text(aes(x = x_val, y = y, label = value_label), hjust = 1, size = pt(sz$value),
+              fontface = "bold", colour = INK) +
+    annotate("text", x = (x0 + x1) / 2, y = rows_top + 0.2, label = "Title odds:  before → after",
+             size = pt(sz$head), fontface = "bold", colour = INK_SOFT, vjust = 0) +
+    annotate("text", x = x_val, y = rows_top + 0.2, label = value_head, hjust = 1,
+             size = pt(sz$head), fontface = "bold", colour = INK_SOFT, vjust = 0) +
+    annotate("text", x = M, y = H - 0.38, label = title, hjust = 0, vjust = 1,
+             size = pt(sz$title), fontface = "bold", colour = INK) +
+    annotate("text", x = M, y = H - 0.9, label = subtitle, hjust = 0, vjust = 1,
+             size = pt(sz$sub), colour = INK_SOFT) +
+    annotate("text", x = M, y = 0.3, label = caption, hjust = 0, vjust = 0,
+             size = pt(sz$cap), colour = INK_SOFT, lineheight = 1.25) +
+    coord_fixed(xlim = c(0, W), ylim = c(0, H), expand = FALSE) +
+    theme_void(base_family = FONT) +
+    theme(plot.background = element_rect(fill = PAPER, colour = NA), plot.margin = margin(0))
+
+  if (headshots) {
+    paths <- vapply(d$pid1, headshot_path, character(1))
+    imgs  <- lapply(paths, read_headshot)
+    for (i in seq_len(n)) {
+      img <- imgs[[i]]
+      if (is.null(img)) next
+      asp <- ncol(img) / nrow(img)                                    # fit the box, keep the aspect
+      w <- min(HS_W, HS_H * asp); h <- w / asp
+      g <- g + annotation_raster(img, xmin = x_hs - w / 2, xmax = x_hs + w / 2,
+                                 ymin = d$y[i] - ROW_H / 2 + 0.02, ymax = d$y[i] - ROW_H / 2 + 0.02 + h)
+    }
+    missing <- vapply(imgs, is.null, logical(1))
+    if (any(missing)) {
+      r <- min(HS_H, HS_W) * 0.42
+      tiles <- d[missing, ] |>
+        mutate(initials = paste0(substr(fnm, 1, 1), substr(lnm, 1, 1))) |>
+        cross_join(tibble(theta = seq(0, 2 * pi, length.out = 61))) |>
+        mutate(cx = x_hs + r * cos(theta), cy = y + r * sin(theta))
+      g <- g +
+        geom_polygon(data = tiles, aes(x = cx, y = cy, group = rank), fill = RULE, colour = NA) +
+        geom_text(data = distinct(tiles, rank, y, initials), aes(x = x_hs, y = y, label = initials),
+                  size = pt(15), fontface = "bold", colour = INK_SOFT)
+      cat("No headshot (initials tile) for:", paste0(d$name[missing], " [pid ", d$pid1[missing], "]", collapse = ", "),
+          "\n  -> add an image URL or file to headshot_overrides\n")
+    }
+  }
+  list(plot = g, width = W, height = H)
+}
+
+yrs <- range(shots$ssn + yr_offset)
+board_caption <- paste0(
+  "Title odds = chance of winning the championship, from the series score and the in-game win probability, ",
+  "with every game a coin flip.\n",
+  "WNBA playoffs ", yrs[1], "–", yrs[2], ". Made field goals only. Series score and game score are from the shooter's side.")
+
+# ---- Simple version, ranked by KL -------------------------------------------
 d <- bigshots_kl |>
   arrange(desc(champ_prob_kl)) |>
-  mutate(rank = row_number()) |>
+  mutate(rank = row_number(), value_label = sprintf("%.3f", champ_prob_kl)) |>
   shot_labels()
-n <- nrow(d)
+board <- shot_board(d, value_head = "KL (bits)", headshots = FALSE,
+                    title = "The biggest shots in WNBA history, by championship leverage",
+                    subtitle = "Ranked by KL divergence between title odds before and after the shot",
+                    caption = board_caption)
+preview(board$plot)
+save_png(board$plot, "wnba_biggest_shots_kl.png", width = board$width, height = board$height)
 
-ggplot(d) +
-  geom_segment(aes(x = champ_prob_win_pre, xend = champ_prob_win_post, y = yn, yend = yn),
-               color = bar_col, linewidth = 1.8, lineend = "round") +
-  geom_point(aes(x = champ_prob_win_pre,  y = yn), color = "grey70", size = 3) +
-  geom_point(aes(x = champ_prob_win_post, y = yn), color = bar_col, size = 4.6) +
-  geom_text(aes(x = champ_prob_win_pre - 0.012, y = yn, label = percent(champ_prob_win_pre, 0.1)),
-            hjust = 1, size = 3.1, color = "grey55") +
-  geom_text(aes(x = champ_prob_win_post + 0.012, y = yn, label = percent(champ_prob_win_post, 0.1)),
-            hjust = 0, size = 3.5, fontface = "bold", color = "grey20") +
-  geom_text(aes(x = -1.15, y = yn + 0.20, label = l1), hjust = 0, size = 4.0, fontface = "bold") +
-  geom_text(aes(x = -1.15, y = yn - 0.22, label = l2), hjust = 0, size = 3.3, color = "grey45") +
-  geom_text(aes(x = 1.18, y = yn, label = sprintf("%.3f", champ_prob_kl)),
-            hjust = 1, size = 3.8, fontface = "bold", color = "#7a2602") +
-  annotate("text", x = 1.18, y = n + 0.8, label = "KL", hjust = 1, fontface = "bold", size = 3.9) +
-  annotate("text", x = 0.42, y = n + 0.8, label = "Championship odds:  before → after",
-           hjust = 0.5, fontface = "bold", size = 3.9, color = "grey30") +
-  scale_x_continuous(breaks = c(0, .25, .5, .75, 1), labels = percent, limits = c(-1.18, 1.22)) +
-  scale_y_continuous(expand = expansion(add = c(0.6, 1.5))) +
-  labs(
-    title = "The biggest shots in WNBA history, by championship leverage",
-    subtitle = "Ranked by KL divergence between title odds before and after the shot • all games modeled 50/50",
-    x = NULL, y = NULL
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(
-    plot.title = element_text(face = "bold", size = 18),
-    plot.subtitle = element_text(color = "grey35", size = 12, margin = margin(b = 12)),
-    panel.grid.major.y = element_blank(),
-    panel.grid.minor = element_blank(),
-    panel.grid.major.x = element_line(color = "grey92"),
-    axis.text.x = element_text(size = 12),
-    axis.text.y = element_blank(),
-    plot.background = element_rect(fill = "white", color = NA),
-    plot.margin = margin(14, 16, 12, 16)
-  )
-
-ggsave(paste0(out_dir, "wnba_biggest_shots_kl.png"), width = 10, height = 1.2 + 0.62 * nrow(bigshots_kl), dpi = 300)
-
-# =====================================================================
-# Biggest shots chart with headshots (ranked by title-odds change)
-# =====================================================================
-library(ggpath)
-
-track_col <- "#ececec"
-band_col  <- "#f7f7f7"
-xL <- -1.72; xR <- 2.02
-kl0 <- 1.24; kl1 <- 1.58
-
-# Players with no usable headshot on the WNBA CDN: add image URL or local path keyed by pid1, e.g.
-# headshot_overrides <- c("100720" = "https://...")
-headshot_overrides <- character(0)
-
+# ---- With headshots, ranked by title-odds change ----------------------------
 d <- bigshots |>
   arrange(desc(champ_prob_change)) |>
-  mutate(
-    rank = row_number(),
-    headshot_url = paste0("https://cdn.wnba.com/headshots/wnba/latest/1040x760/", pid1, ".png"),
-    headshot_url = coalesce(unname(headshot_overrides[as.character(pid1)]), headshot_url),
-    chg_frac = champ_prob_change / max(champ_prob_change)
-  ) |>
+  mutate(rank = row_number(), value_label = sprintf("%+.1f pts", 100 * champ_prob_change)) |>
   shot_labels()
-n <- nrow(d)
+board <- shot_board(d, value_head = "Swing",
+                    title = "The biggest shots in WNBA history",
+                    subtitle = "Made shots ranked by how much they raised the shooting team's championship odds",
+                    caption = board_caption)
+preview(board$plot)
+save_png(board$plot, "wnba_biggest_shots.png", width = board$width, height = board$height)
 
-ggplot(d) +
-  geom_rect(data = filter(d, rank %% 2 == 0),
-            aes(xmin = xL, xmax = xR, ymin = yn - 0.5, ymax = yn + 0.5), fill = band_col) +
-  geom_from_path(aes(x = -1.55, y = yn, path = headshot_url), width = 0.085) +
-  geom_text(aes(x = -1.31, y = yn + 0.22, label = l1), hjust = 0, size = 5.9, fontface = "bold") +
-  geom_text(aes(x = -1.31, y = yn - 0.25, label = l2), hjust = 0, size = 4.5, color = "grey45") +
-  geom_segment(aes(x = champ_prob_win_pre, xend = champ_prob_win_post, y = yn, yend = yn),
-               color = bar_col, linewidth = 2.1, lineend = "round") +
-  geom_point(aes(x = champ_prob_win_pre,  y = yn), color = "grey70", size = 3.8) +
-  geom_point(aes(x = champ_prob_win_post, y = yn), color = bar_col, size = 5.6) +
-  geom_text(aes(x = champ_prob_win_pre - 0.030, y = yn, label = percent(champ_prob_win_pre, 0.1)),
-            hjust = 1, size = 4.7, color = "grey55") +
-  geom_text(aes(x = champ_prob_win_post + 0.034, y = yn, label = percent(champ_prob_win_post, 0.1)),
-            hjust = 0, size = 5.2, fontface = "bold", color = "grey20") +
-  geom_segment(aes(x = kl0, xend = kl1, y = yn, yend = yn),
-               color = track_col, linewidth = 6.6, lineend = "round") +
-  geom_segment(aes(x = kl0, xend = kl0 + chg_frac * (kl1 - kl0), y = yn, yend = yn),
-               color = "#a63603", linewidth = 6.6, lineend = "round") +
-  geom_text(aes(x = kl1 + 0.05, y = yn, label = sprintf("%+.1f pts", 100 * champ_prob_change)),
-            hjust = 0, size = 5.2, fontface = "bold", color = "#7a2602") +
-  annotate("text", x = 0.42, y = n + 0.95, label = "Championship odds:  before → after",
-           hjust = 0.5, fontface = "bold", size = 5.4, color = "grey30") +
-  annotate("text", x = (kl0 + kl1) / 2, y = n + 0.95, label = "Title-odds swing",
-           hjust = 0.5, fontface = "bold", size = 5.4, color = "grey30") +
-  scale_x_continuous(breaks = c(0, .25, .5, .75, 1), labels = percent, limits = c(xL, xR)) +
-  scale_y_continuous(expand = expansion(add = c(0.55, 0.75))) +
-  labs(
-    title = "The biggest shots in WNBA history, by championship impact",
-    subtitle = "Ranked by swing in title odds before and after the shot • all games modeled 50/50",
-    x = NULL, y = NULL
-  ) +
-  theme_minimal(base_size = 16) +
-  theme(
-    plot.title = element_text(face = "bold", size = 24),
-    plot.subtitle = element_text(color = "grey35", size = 15.5, margin = margin(b = 16)),
-    panel.grid = element_blank(),
-    axis.text.x = element_text(size = 17, color = "grey45"),
-    axis.text.y = element_blank(),
-    plot.background = element_rect(fill = "white", color = NA),
-    plot.margin = margin(18, 20, 14, 20)
-  )
-
-ggsave(paste0(out_dir, "wnba_biggest_shots.png"), width = 13, height = 1.6 + 0.95 * nrow(bigshots), dpi = 300)
+# The rows as drawn, for checking each one against the record
+print(as_tibble(select(d, rank, name, detail, champ_prob_win_pre, champ_prob_win_post, value_label, gid)),
+      n = Inf, width = Inf)
+write.csv(select(d, rank, name, detail, ssn, dt, gid, pid1, q, min, sec, wp, wpa,
+                 champ_prob_win_pre, champ_prob_win_post, champ_prob_change),
+          paste0(out_dir, "wnba_biggest_shots.csv"), row.names = FALSE)
