@@ -547,85 +547,73 @@ wrap_in <- function(x, pt, width, bold = FALSE) {
 }
 
 # d: one row per shot, ranked, with shot_labels() columns plus value_label.
-# Each row stacks the name, one detail line and the before -> after track, so the track
-# shares the text column's width instead of adding its own - that is what lets the type be
-# large relative to the image. Returns list(plot, width, height) in inches, so the PNG is
-# drawn at exactly that size.
+# Each row is [rank | headshot | name over one detail line | before -> after track | swing]:
+# the track has a column of its own, clear of the text, with full-height quarter
+# gridlines. Returns list(plot, width, height) in inches, so the PNG is drawn at exactly
+# that size.
 shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE) {
   n <- nrow(d)
-  M <- 0.5; ROW_H <- 1.24; MIN_TRACK <- 3.6; GAP_V <- 0.75           # GAP_V: text -> value column
-  AV <- 1.06                                                          # headshot circle diameter
-  sz <- list(rank = 34, name = 24, detail = 16, pre = 15, post = 17.5, value = 25,
+  M <- 0.5; ROW_H <- 1.02; TRACK_W <- 5.2; GAP_V <- 0.5               # GAP_V: post label -> values
+  AV <- 0.86                                                          # headshot circle diameter
+  sz <- list(rank = 32, name = 24, detail = 16, pre = 15, post = 17.5, value = 25,
              head = 15, axis = 14.5, title = 38, sub = 18.5, cap = 14)
   d <- d |> mutate(detail_txt = paste0(stage_txt, " \u00b7 ", play_txt))
 
   x_rank <- M + text_in("10", sz$rank, TRUE)                          # rank numbers right-aligned here
   x_av   <- x_rank + 0.26 + AV / 2
   x_text <- if (headshots) x_av + AV / 2 + 0.26 else x_rank + 0.32
-  pre_w  <- text_in("100.0%", sz$pre) + 0.16                           # room for a pre label left of 0%
-  post_w <- text_in("100.0%", sz$post, TRUE) + 0.18                    # and a post label right of 100%
-  text_w <- max(text_in(d$name, sz$name, TRUE), text_in(d$detail_txt, sz$detail),
-                pre_w + MIN_TRACK + post_w)
+  text_w <- max(text_in(d$name, sz$name, TRUE), text_in(d$detail_txt, sz$detail))
+  x0     <- x_text + text_w + text_in("100.0%", sz$pre) + 0.45        # 0% sits past the widest pre label
+  x1     <- x0 + TRACK_W                                              # 100%
   val_w  <- max(text_in(d$value_label, sz$value, TRUE), lines_in(value_head, sz$head, TRUE))
-  W      <- x_text + text_w + GAP_V + val_w + M                        # the rows set the width ...
-  title    <- wrap_in(title, sz$title, W - 2 * M, TRUE)               # ... and the words wrap to it
-  subtitle <- wrap_in(subtitle, sz$sub, W - 2 * M)
+  W      <- x1 + 0.18 + text_in("100.0%", sz$post, TRUE) + GAP_V + val_w + M
+  x_val  <- W - M                                                     # values right-aligned here
+  title    <- wrap_in(title, sz$title, W - 2 * M, TRUE)               # the rows set the width and
+  subtitle <- wrap_in(subtitle, sz$sub, W - 2 * M)                    # the words wrap to it
   caption  <- wrap_in(caption, sz$cap, W - 2 * M)
   n_lines  <- function(x) length(strsplit(x, "\n")[[1]])
-  x_val  <- W - M                                                     # values right-aligned here
-  x0     <- x_text + pre_w                                            # 0%
-  x1     <- x_val - val_w - GAP_V - post_w                            # 100%
-  TRACK_W <- x1 - x0
 
   LH <- function(p) p / 72 * 1.3                                      # line height, inches
   y_sub  <- 0.5 + n_lines(title) * LH(sz$title) + 0.1                 # from the top edge
-  TOP    <- y_sub + n_lines(subtitle) * LH(sz$sub) + 1.15              # + column headers and axis labels
-  BOTTOM <- 0.62 + n_lines(caption) * LH(sz$cap) + 0.4
+  TOP    <- y_sub + n_lines(subtitle) * LH(sz$sub) + 0.85             # + column headers
+  BOTTOM <- 0.6 + n_lines(caption) * LH(sz$cap) + 0.4
   H      <- TOP + n * ROW_H + BOTTOM
 
-  d <- d |> mutate(y = H - TOP - (rank - 0.5) * ROW_H, y_track = y - 0.35,
+  d <- d |> mutate(y = H - TOP - (rank - 0.5) * ROW_H, row_bg = ifelse(rank %% 2 == 0, STRIPE, PAPER),
                    x_pre = x0 + champ_prob_win_pre * TRACK_W, x_post = x0 + champ_prob_win_post * TRACK_W)
   rows_top <- H - TOP; rows_bot <- H - TOP - n * ROW_H
-  # The 0-100% scale under each dumbbell, left out wherever a percentage label sits
-  d <- d |> mutate(lab_l = x_pre - 0.16 - text_in(percent(champ_prob_win_pre, 0.1), sz$pre) - 0.06,
-                   lab_r = x_post + 0.18 + text_in(percent(champ_prob_win_post, 0.1), sz$post, TRUE) + 0.06)
-  scale <- bind_rows(transmute(d, y_track, xa = x0, xb = pmin(lab_l, x1)),
-                     transmute(d, y_track, xa = pmax(lab_r, x0), xb = x1)) |> filter(xb > xa)
-  ticks <- cross_join(select(d, y_track, lab_l, lab_r), tibble(p = seq(0, 1, 0.25))) |>
-    mutate(x = x0 + p * TRACK_W) |> filter(x < lab_l | x > lab_r)
-  axis  <- tibble(p = seq(0, 1, 0.25), x = x0 + p * TRACK_W)
+  # percentages sit on a patch of their row's colour, so gridlines stop at the text
+  pct_label <- function(...) geom_label(..., family = FONT, label.size = 0, label.r = unit(0, "pt"),
+                                        label.padding = unit(1.5, "pt"))
+  grid <- tibble(p = seq(0, 1, 0.25), x = x0 + p * TRACK_W)
 
   g <- ggplot(d) +
     geom_rect(data = filter(d, rank %% 2 == 0),
               aes(xmin = M - 0.2, xmax = W - M + 0.2, ymin = y - ROW_H / 2, ymax = y + ROW_H / 2),
               fill = STRIPE) +
-    # the 0-100% scale under every dumbbell, with quarter ticks; labelled once above and below
-    geom_segment(data = scale, aes(x = xa, xend = xb, y = y_track, yend = y_track), colour = RULE, linewidth = 0.8) +
-    geom_segment(data = ticks, aes(x = x, xend = x, y = y_track - 0.06, yend = y_track + 0.06),
-                 colour = RULE, linewidth = 0.8) +
-    geom_text(data = axis, aes(x = x, y = rows_bot - 0.2, label = percent(p)),
+    geom_segment(data = grid, aes(x = x, xend = x, y = rows_bot, yend = rows_top),
+                 colour = RULE, linewidth = 0.45) +
+    geom_text(data = grid, aes(x = x, y = rows_bot - 0.2, label = percent(p)),
               size = pt(sz$axis), colour = INK_SOFT, vjust = 1) +
-    geom_text(data = axis, aes(x = x, y = rows_top + 0.14, label = percent(p)),
-              size = pt(sz$axis), colour = INK_SOFT, vjust = 0) +
     geom_text(aes(x = x_rank, y = y, label = rank), hjust = 1, size = pt(sz$rank),
               fontface = "bold", colour = INK_SOFT) +
-    geom_text(aes(x = x_text, y = y + 0.36, label = name), hjust = 0, size = pt(sz$name),
+    geom_text(aes(x = x_text, y = y + 0.18, label = name), hjust = 0, size = pt(sz$name),
               fontface = "bold", colour = INK) +
-    geom_text(aes(x = x_text, y = y + 0.03, label = detail_txt), hjust = 0, size = pt(sz$detail),
+    geom_text(aes(x = x_text, y = y - 0.2, label = detail_txt), hjust = 0, size = pt(sz$detail),
               colour = INK_SOFT) +
-    geom_segment(aes(x = x_pre, xend = x_post, y = y_track, yend = y_track),
+    geom_segment(aes(x = x_pre, xend = x_post, y = y, yend = y),
                  colour = ACCENT, linewidth = 3, lineend = "round") +
-    geom_point(aes(x = x_pre, y = y_track), shape = 21, size = 4.8, stroke = 1.8, fill = PAPER, colour = ACCENT) +
-    geom_point(aes(x = x_post, y = y_track), shape = 21, size = 6.6, stroke = 1.3, fill = ACCENT, colour = PAPER) +
-    geom_text(aes(x = x_pre - 0.16, y = y_track, label = percent(champ_prob_win_pre, 0.1)),
+    geom_point(aes(x = x_pre, y = y), shape = 21, size = 4.8, stroke = 1.8, fill = PAPER, colour = ACCENT) +
+    geom_point(aes(x = x_post, y = y), shape = 21, size = 6.6, stroke = 1.3, fill = ACCENT, colour = PAPER) +
+    pct_label(aes(x = x_pre - 0.14, y = y, label = percent(champ_prob_win_pre, 0.1), fill = I(row_bg)),
               hjust = 1, size = pt(sz$pre), colour = INK_SOFT) +
-    geom_text(aes(x = x_post + 0.18, y = y_track, label = percent(champ_prob_win_post, 0.1)),
+    pct_label(aes(x = x_post + 0.16, y = y, label = percent(champ_prob_win_post, 0.1), fill = I(row_bg)),
               hjust = 0, size = pt(sz$post), fontface = "bold", colour = INK) +
     geom_text(aes(x = x_val, y = y, label = value_label), hjust = 1, size = pt(sz$value),
               fontface = "bold", colour = INK) +
-    annotate("text", x = x_text, y = rows_top + 0.58, label = "Title odds:  before \u2192 after",
-             hjust = 0, vjust = 0, size = pt(sz$head), fontface = "bold", colour = INK_SOFT) +
-    annotate("text", x = x_val, y = rows_top + 0.14, label = value_head, hjust = 1, vjust = 0,
+    annotate("text", x = (x0 + x1) / 2, y = rows_top + 0.16, label = "Title odds:  before \u2192 after",
+             vjust = 0, size = pt(sz$head), fontface = "bold", colour = INK_SOFT) +
+    annotate("text", x = x_val, y = rows_top + 0.16, label = value_head, hjust = 1, vjust = 0,
              size = pt(sz$head), fontface = "bold", colour = INK_SOFT, lineheight = 1.1) +
     annotate("text", x = M, y = H - 0.5, label = title, hjust = 0, vjust = 1,
              size = pt(sz$title), fontface = "bold", colour = INK, lineheight = 1.05) +
@@ -652,7 +640,7 @@ shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE
       g <- g +
         geom_polygon(data = tiles, aes(x = cx, y = cy, group = rank), fill = AVATAR_BG, colour = NA) +
         geom_text(data = distinct(tiles, rank, y, initials), aes(x = x_av, y = y, label = initials),
-                  size = pt(23), fontface = "bold", colour = INK_SOFT)
+                  size = pt(20), fontface = "bold", colour = INK_SOFT)
       cat("No headshot (initials tile) for:", paste0(d$name[missing], " [pid ", d$pid1[missing], "]", collapse = ", "),
           "\n  -> add an image named by pid or name to headshot_files, e.g.",
           paste0(d$pid1[missing][1], ".png or '", d$name[missing][1], ".jpg'\n"))
