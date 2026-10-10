@@ -23,6 +23,8 @@ po_prefix   <- "104"               # WNBA playoff gid prefix (excludes Commissio
 incomplete_yr <- 2026              # season whose playoffs are still in progress (unfinished series allowed); NA once the Finals end
 n_shots     <- 10                  # rows kept in bigshots
 min_minutes <- 300                 # top_shooters plot cutoff (WNBA playoff careers are shorter)
+headshot_files <- paste0(out_dir, "wnba_headshots/")  # your own headshots, named by pid1 ("100639.png")
+                                   # or player name ("Deanna Nolan.jpg"); these beat every other source
 
 sqlf<-function(x) {
   drv <- dbDriver("MySQL")
@@ -449,49 +451,72 @@ shot_labels <- function(d) d |>
                        TRUE         ~ paste0(ROUND_TXT[round_lab], " G", game, ", ", series)),
     score  = paste0(shooter_pts - shot_pts, "–", opp_pts, " → ", shooter_pts, "–", opp_pts),
     name   = paste(fnm, lnm),
-    detail = paste0(yr, " ", stage, "  ·  ", period, " ", clock, "  ·  ", score)
+    stage_txt = paste(yr, stage),
+    play_txt  = paste0(period, " ", clock, "  ·  ", score),
+    detail    = paste0(stage_txt, "  ·  ", play_txt)
   )
 
 # ---- Headshots --------------------------------------------------------------
-# An override if the player has one, else the WNBA CDN by player id. The CDN answers
-# a player it has no photo for with a generic silhouette, so a download identical to
-# the one it serves for a nonexistent id counts as missing, and a missing headshot
-# gets an initials tile. Downloads are cached in out_dir/headshots (delete a file to
-# re-fetch it). A missing headshot is cosmetic, so nothing here stops the script.
+# Resolution order, best first:
+#   1. your own image in headshot_files, named by pid1 or player name ("100639.png",
+#      "Deanna Nolan.jpg" - case, spaces and punctuation are ignored);
+#   2. headshot_overrides: an image URL or file for a pid1;
+#   3. the WNBA CDN by pid1. The CDN answers a player it has no photo for with a
+#      generic silhouette, so a download identical to the one it serves for a
+#      nonexistent id counts as missing;
+#   4. an initials tile.
+# Every headshot is cropped to a circle on AVATAR_BG, so cut-outs and photos with their
+# own backgrounds look alike. Downloads are cached in out_dir/headshot_cache (delete a
+# file to re-fetch it). A missing headshot is cosmetic, so nothing here stops the script.
 HEADSHOT_URL <- "https://cdn.wnba.com/headshots/wnba/latest/1040x760/%s.png"
-# Players the CDN has no photo for: image URL or local file, keyed by pid1
-# (pid1 = the WNBA/stats.wnba.com person id; ESPN's ids differ).
-headshot_overrides <- c(
-  "200674" = "https://a.espncdn.com/i/headshots/wnba/players/full/680.png",   # Sophia Young-Malcolm
-  "100639" = "https://a.espncdn.com/i/headshots/wnba/players/full/312.png",   # Deanna Nolan
-  "100396" = "https://a.espncdn.com/i/headshots/wnba/players/full/9.png"      # DeLisha Milton-Jones
-)
+headshot_overrides <- character(0)   # e.g. c("100639" = "https://.../nolan.png")
+AVATAR_BG <- "#e9e6e1"
 
-headshot_dir <- file.path(path.expand(out_dir), "headshots")
-dir.create(headshot_dir, showWarnings = FALSE, recursive = TRUE)
+name_key    <- function(x) gsub("[^a-z0-9]", "", tolower(x))
+local_heads <- list.files(path.expand(headshot_files), pattern = "\\.(png|jpe?g|webp|gif)$",
+                          ignore.case = TRUE, full.names = TRUE)
+local_keys  <- name_key(tools::file_path_sans_ext(basename(local_heads)))
+cat(sprintf("Headshots: %d file(s) in %s\n", length(local_heads), headshot_files))
+
+cache_dir <- file.path(path.expand(out_dir), "headshot_cache")
+dir.create(cache_dir, showWarnings = FALSE, recursive = TRUE)
 fetch_image <- function(src, dest) {
-  if (file.exists(src)) return(src)                                  # a local file
+  if (file.exists(path.expand(src))) return(path.expand(src))       # a local file
   if (!file.exists(dest)) try(download.file(src, dest, mode = "wb", quiet = TRUE), silent = TRUE)
   if (file.exists(dest) && file.size(dest) > 1000) return(dest)     # smaller = an error page
   unlink(dest)
   NA_character_
 }
-cdn_silhouette <- fetch_image(sprintf(HEADSHOT_URL, "0"), file.path(headshot_dir, "cdn_silhouette.png"))
-headshot_path <- function(pid) {
-  pid  <- as.character(pid)
+cdn_silhouette <- fetch_image(sprintf(HEADSHOT_URL, "0"), file.path(cache_dir, "cdn_silhouette.png"))
+headshot_path <- function(pid, name) {
+  pid <- as.character(pid)
+  hit <- local_heads[local_keys %in% name_key(c(pid, name))]
+  if (length(hit)) return(hit[1])
   over <- unname(headshot_overrides[pid])
   if (!is.na(over)) {
-    path <- fetch_image(over, file.path(headshot_dir, paste0(pid, "_override.", tools::file_ext(over))))
+    path <- fetch_image(over, file.path(cache_dir, paste0(pid, "_override.", tools::file_ext(over))))
     if (!is.na(path)) return(path)
   }
-  path <- fetch_image(sprintf(HEADSHOT_URL, pid), file.path(headshot_dir, paste0(pid, ".png")))
+  path <- fetch_image(sprintf(HEADSHOT_URL, pid), file.path(cache_dir, paste0(pid, ".png")))
   if (!is.na(path) && !is.na(cdn_silhouette) &&
       unname(tools::md5sum(path)) == unname(tools::md5sum(cdn_silhouette))) return(NA_character_)
   path
 }
-read_headshot <- function(path) {
+# Square crop from the top (faces sit high in a head-and-shoulders shot), laid on an
+# AVATAR_BG disc and clipped to it.
+read_headshot <- function(path, px = 500) {
   if (is.na(path)) return(NULL)
-  tryCatch(as.raster(image_trim(image_read(path)[1])), error = function(e) NULL)
+  tryCatch({
+    img  <- image_trim(image_read(path)[1])
+    info <- image_info(img)
+    side <- min(info$width, info$height)
+    img  <- image_crop(img, sprintf("%dx%d+%d+0", side, side, (info$width - side) %/% 2)) |>
+      image_scale(sprintf("%dx%d!", px, px))
+    disc <- image_draw(image_blank(px, px, "none"))                  # AVATAR_BG disc, clear outside
+    symbols(px / 2, px / 2, circles = px / 2, inches = FALSE, add = TRUE, bg = AVATAR_BG, fg = NA)
+    dev.off()
+    as.raster(image_composite(disc, img, operator = "Atop"))         # photo only where the disc is
+  }, error = function(e) NULL)
 }
 
 # ---- Board ------------------------------------------------------------------
@@ -500,24 +525,29 @@ text_in <- function(x, pt, bold = FALSE)
   systemfonts::string_width(x, family = FONT, size = pt, bold = bold, res = 72) / 72
 pt <- function(x) x / .pt                                            # font points -> geom_text size
 
+# widest line of each (possibly multi-line) label
+lines_in <- function(x, pt, bold = FALSE) max(text_in(unlist(strsplit(x, "\n")), pt, bold))
+
 # d: one row per shot, ranked, with shot_labels() columns plus value_label.
 # Returns list(plot, width, height) in inches, so the PNG is drawn at exactly that size.
 shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE) {
   n <- nrow(d)
-  M <- 0.45; ROW_H <- 0.84; TOP <- 1.55; BOTTOM <- 1.05; TRACK_W <- 4.4
-  HS_H <- 0.74; HS_W <- 1.02                                          # headshot box
-  sz <- list(rank = 20, name = 14.5, detail = 10.5, pre = 10, post = 11.5, value = 13,
-             head = 10.5, axis = 10, title = 22, sub = 12, cap = 9)
+  M <- 0.5; ROW_H <- 1.12; TOP <- 2.15; BOTTOM <- 1.45; TRACK_W <- 3.6
+  AV <- 0.92                                                          # headshot circle diameter
+  sz <- list(rank = 28, name = 19, detail = 13.5, pre = 12.5, post = 15, value = 18,
+             head = 12.5, axis = 12.5, title = 30, sub = 15.5, cap = 11.5)
 
   x_rank <- M + text_in("10", sz$rank, TRUE)                          # rank numbers right-aligned here
-  x_hs   <- x_rank + 0.2 + HS_W / 2
-  x_text <- if (headshots) x_hs + HS_W / 2 + 0.2 else x_rank + 0.3
-  text_w <- max(text_in(d$name, sz$name, TRUE), text_in(d$detail, sz$detail))
-  x0     <- x_text + text_w + text_in("100.0%", sz$pre) + 0.3         # 0% sits past the widest pre label
-  x1     <- x0 + TRACK_W                                              # 100%
-  val_w  <- max(text_in(c(d$value_label, value_head), sz$value, TRUE))
-  W      <- max(x1 + text_in("100.0%", sz$post, TRUE) + 0.35 + val_w + M,
-                text_in(title, sz$title, TRUE) + 2 * M, text_in(subtitle, sz$sub) + 2 * M)
+  x_av   <- x_rank + 0.24 + AV / 2
+  x_text <- if (headshots) x_av + AV / 2 + 0.24 else x_rank + 0.3
+  text_w <- max(text_in(d$name, sz$name, TRUE), text_in(c(d$stage_txt, d$play_txt), sz$detail))
+  x0     <- x_text + text_w + text_in("100.0%", sz$pre) + 0.35        # 0% sits past the widest pre label
+  val_w  <- max(text_in(d$value_label, sz$value, TRUE), lines_in(value_head, sz$head, TRUE))
+  W_rows <- x0 + TRACK_W + text_in("100.0%", sz$post, TRUE) + 0.4 + val_w + M
+  W      <- max(W_rows, text_in(title, sz$title, TRUE) + 2 * M, text_in(subtitle, sz$sub) + 2 * M,
+                lines_in(caption, sz$cap) + 2 * M)
+  TRACK_W <- TRACK_W + (W - W_rows)                                   # a wider title widens the track,
+  x1     <- x0 + TRACK_W                                              # not the gap before the values
   x_val  <- W - M                                                     # values right-aligned here
   H      <- TOP + n * ROW_H + BOTTOM
 
@@ -528,66 +558,63 @@ shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE
 
   g <- ggplot(d) +
     geom_rect(data = filter(d, rank %% 2 == 0),
-              aes(xmin = M - 0.15, xmax = W - M + 0.15, ymin = y - ROW_H / 2, ymax = y + ROW_H / 2),
+              aes(xmin = M - 0.18, xmax = W - M + 0.18, ymin = y - ROW_H / 2, ymax = y + ROW_H / 2),
               fill = STRIPE) +
     geom_segment(data = grid, aes(x = x, xend = x, y = rows_bot, yend = rows_top),
-                 colour = RULE, linewidth = 0.35) +
-    geom_text(data = grid, aes(x = x, y = rows_bot - 0.2, label = percent(p)),
+                 colour = RULE, linewidth = 0.4) +
+    geom_text(data = grid, aes(x = x, y = rows_bot - 0.22, label = percent(p)),
               size = pt(sz$axis), colour = INK_SOFT, vjust = 1) +
     geom_text(aes(x = x_rank, y = y, label = rank), hjust = 1, size = pt(sz$rank),
               fontface = "bold", colour = INK_SOFT) +
-    geom_text(aes(x = x_text, y = y + 0.13, label = name), hjust = 0, size = pt(sz$name),
+    geom_text(aes(x = x_text, y = y + 0.27, label = name), hjust = 0, size = pt(sz$name),
               fontface = "bold", colour = INK) +
-    geom_text(aes(x = x_text, y = y - 0.17, label = detail), hjust = 0, size = pt(sz$detail),
+    geom_text(aes(x = x_text, y = y - 0.04, label = stage_txt), hjust = 0, size = pt(sz$detail),
+              colour = INK_SOFT) +
+    geom_text(aes(x = x_text, y = y - 0.30, label = play_txt), hjust = 0, size = pt(sz$detail),
               colour = INK_SOFT) +
     geom_segment(aes(x = x_pre, xend = x_post, y = y, yend = y),
-                 colour = ACCENT, linewidth = 2.2, lineend = "round") +
-    geom_point(aes(x = x_pre, y = y), shape = 21, size = 3.6, stroke = 1.4, fill = PAPER, colour = ACCENT) +
-    geom_point(aes(x = x_post, y = y), shape = 21, size = 5, stroke = 1.1, fill = ACCENT, colour = PAPER) +
-    geom_text(aes(x = x_pre - 0.14, y = y, label = percent(champ_prob_win_pre, 0.1)),
+                 colour = ACCENT, linewidth = 2.8, lineend = "round") +
+    geom_point(aes(x = x_pre, y = y), shape = 21, size = 4.6, stroke = 1.7, fill = PAPER, colour = ACCENT) +
+    geom_point(aes(x = x_post, y = y), shape = 21, size = 6.4, stroke = 1.3, fill = ACCENT, colour = PAPER) +
+    geom_text(aes(x = x_pre - 0.16, y = y, label = percent(champ_prob_win_pre, 0.1)),
               hjust = 1, size = pt(sz$pre), colour = INK_SOFT) +
-    geom_text(aes(x = x_post + 0.15, y = y, label = percent(champ_prob_win_post, 0.1)),
+    geom_text(aes(x = x_post + 0.18, y = y, label = percent(champ_prob_win_post, 0.1)),
               hjust = 0, size = pt(sz$post), fontface = "bold", colour = INK) +
     geom_text(aes(x = x_val, y = y, label = value_label), hjust = 1, size = pt(sz$value),
               fontface = "bold", colour = INK) +
     annotate("text", x = (x0 + x1) / 2, y = rows_top + 0.2, label = "Title odds:  before → after",
              size = pt(sz$head), fontface = "bold", colour = INK_SOFT, vjust = 0) +
-    annotate("text", x = x_val, y = rows_top + 0.2, label = value_head, hjust = 1,
-             size = pt(sz$head), fontface = "bold", colour = INK_SOFT, vjust = 0) +
-    annotate("text", x = M, y = H - 0.38, label = title, hjust = 0, vjust = 1,
+    annotate("text", x = x_val, y = rows_top + 0.2, label = value_head, hjust = 1, vjust = 0,
+             size = pt(sz$head), fontface = "bold", colour = INK_SOFT, lineheight = 1.1) +
+    annotate("text", x = M, y = H - 0.5, label = title, hjust = 0, vjust = 1,
              size = pt(sz$title), fontface = "bold", colour = INK) +
-    annotate("text", x = M, y = H - 0.9, label = subtitle, hjust = 0, vjust = 1,
+    annotate("text", x = M, y = H - 1.12, label = subtitle, hjust = 0, vjust = 1,
              size = pt(sz$sub), colour = INK_SOFT) +
-    annotate("text", x = M, y = 0.3, label = caption, hjust = 0, vjust = 0,
-             size = pt(sz$cap), colour = INK_SOFT, lineheight = 1.25) +
+    annotate("text", x = M, y = 0.4, label = caption, hjust = 0, vjust = 0,
+             size = pt(sz$cap), colour = INK_SOFT, lineheight = 1.3) +
     coord_fixed(xlim = c(0, W), ylim = c(0, H), expand = FALSE) +
     theme_void(base_family = FONT) +
     theme(plot.background = element_rect(fill = PAPER, colour = NA), plot.margin = margin(0))
 
   if (headshots) {
-    paths <- vapply(d$pid1, headshot_path, character(1))
+    paths <- vapply(seq_len(n), function(i) headshot_path(d$pid1[i], d$name[i]), character(1))
     imgs  <- lapply(paths, read_headshot)
-    for (i in seq_len(n)) {
-      img <- imgs[[i]]
-      if (is.null(img)) next
-      asp <- ncol(img) / nrow(img)                                    # fit the box, keep the aspect
-      w <- min(HS_W, HS_H * asp); h <- w / asp
-      g <- g + annotation_raster(img, xmin = x_hs - w / 2, xmax = x_hs + w / 2,
-                                 ymin = d$y[i] - ROW_H / 2 + 0.02, ymax = d$y[i] - ROW_H / 2 + 0.02 + h)
-    }
+    for (i in which(!vapply(imgs, is.null, logical(1))))
+      g <- g + annotation_raster(imgs[[i]], xmin = x_av - AV / 2, xmax = x_av + AV / 2,
+                                 ymin = d$y[i] - AV / 2, ymax = d$y[i] + AV / 2)
     missing <- vapply(imgs, is.null, logical(1))
     if (any(missing)) {
-      r <- min(HS_H, HS_W) * 0.42
       tiles <- d[missing, ] |>
         mutate(initials = paste0(substr(fnm, 1, 1), substr(lnm, 1, 1))) |>
-        cross_join(tibble(theta = seq(0, 2 * pi, length.out = 61))) |>
-        mutate(cx = x_hs + r * cos(theta), cy = y + r * sin(theta))
+        cross_join(tibble(theta = seq(0, 2 * pi, length.out = 73))) |>
+        mutate(cx = x_av + AV / 2 * cos(theta), cy = y + AV / 2 * sin(theta))
       g <- g +
-        geom_polygon(data = tiles, aes(x = cx, y = cy, group = rank), fill = RULE, colour = NA) +
-        geom_text(data = distinct(tiles, rank, y, initials), aes(x = x_hs, y = y, label = initials),
-                  size = pt(15), fontface = "bold", colour = INK_SOFT)
+        geom_polygon(data = tiles, aes(x = cx, y = cy, group = rank), fill = AVATAR_BG, colour = NA) +
+        geom_text(data = distinct(tiles, rank, y, initials), aes(x = x_av, y = y, label = initials),
+                  size = pt(20), fontface = "bold", colour = INK_SOFT)
       cat("No headshot (initials tile) for:", paste0(d$name[missing], " [pid ", d$pid1[missing], "]", collapse = ", "),
-          "\n  -> add an image URL or file to headshot_overrides\n")
+          "\n  -> save an image in", headshot_files, "named by pid or name, e.g.",
+          paste0(d$pid1[missing][1], ".png or '", d$name[missing][1], ".jpg'\n"))
     }
   }
   list(plot = g, width = W, height = H)
@@ -604,7 +631,7 @@ d <- bigshots_kl |>
   arrange(desc(champ_prob_kl)) |>
   mutate(rank = row_number(), value_label = sprintf("%.3f", champ_prob_kl)) |>
   shot_labels()
-board <- shot_board(d, value_head = "KL (bits)", headshots = FALSE,
+board <- shot_board(d, value_head = "KL\n(bits)", headshots = FALSE,
                     title = "The biggest shots in WNBA history, by championship leverage",
                     subtitle = "Ranked by KL divergence between title odds before and after the shot",
                     caption = board_caption)
@@ -614,9 +641,9 @@ save_png(board$plot, "wnba_biggest_shots_kl.png", width = board$width, height = 
 # ---- With headshots, ranked by title-odds change ----------------------------
 d <- bigshots |>
   arrange(desc(champ_prob_change)) |>
-  mutate(rank = row_number(), value_label = sprintf("%+.1f pts", 100 * champ_prob_change)) |>
+  mutate(rank = row_number(), value_label = sprintf("%+.1f", 100 * champ_prob_change)) |>
   shot_labels()
-board <- shot_board(d, value_head = "Swing",
+board <- shot_board(d, value_head = "Swing\n(pct. pts)",
                     title = "The biggest shots in WNBA history",
                     subtitle = "Made shots ranked by how much they raised the shooting team's championship odds",
                     caption = board_caption)
