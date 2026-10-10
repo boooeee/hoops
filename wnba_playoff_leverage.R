@@ -152,9 +152,16 @@ series_outcome <- series_outcome %>%
          round_lab = round_name(yr, rounds_after),
          expected  = expected_best_of(yr, rounds_after))
 
+# A finished series whose winner has fewer wins than the format needs is missing games in
+# gms, and every game after the gap gets the wrong series score. (2021 Finals G3 missing ->
+# G4 charted as a winner-take-all "G3 (1-1)" of a Bo3.) Stop rather than chart bad numbers.
 format_check <- filter(series_outcome, is.na(expected) | best_of != expected)
-print(format_check)   # should be empty; anything here = incomplete series or data issue
 print(count(series_outcome, yr, round_lab, best_of), n = 200)
+if (nrow(format_check) > 0) {
+  print(format_check)
+  stop("Series above don't match the known playoff format - most likely games missing from gms. ",
+       "Backfill them (and their box/wpg rows) and re-run.")
+}
 
 po_situation <- po_series %>%
   inner_join(select(series_outcome,series_teams,best_of,rounds_after,round_lab),join_by(series_teams)) %>%
@@ -209,13 +216,14 @@ df <- bxa %>%
   group_by(ssn) %>%
   summarise(dfWPA=sum(dfWPA))
 
-bigshots <- wp %>%
+shots <- wp %>%
   filter(substr(gid,1,3)==po_prefix) %>%
   filter(pt1 %in% c("MK2","MK3")) %>%
   left_join(select(po_situation,dt,htm,atm,top_seed,round_lab,rounds_after,best_of,top_seed_sitch,bottom_seed_sitch,gid,series_prob_win,series_prob_loss),join_by(gid)) %>%
   left_join(select(player,pid,ssn,fnm=fn,lnm=ln),join_by(pid1==pid,ssn)) %>%
-  mutate(series_prob_win_shooter=ifelse((di=="h" & htm==top_seed) | (di=="a" & atm==top_seed),series_prob_win,1-series_prob_loss)) %>%
-  mutate(series_prob_loss_shooter=ifelse((di=="h" & htm==top_seed) | (di=="a" & atm==top_seed),series_prob_loss,1-series_prob_win)) %>%
+  mutate(shooter_top=(di=="h" & htm==top_seed) | (di=="a" & atm==top_seed)) %>%
+  mutate(series_prob_win_shooter=ifelse(shooter_top,series_prob_win,1-series_prob_loss)) %>%
+  mutate(series_prob_loss_shooter=ifelse(shooter_top,series_prob_loss,1-series_prob_win)) %>%
   mutate(champ_prob_win_shooter=series_prob_win_shooter*(1/2)^rounds_after) %>%
   mutate(champ_prob_loss_shooter=series_prob_loss_shooter*(1/2)^rounds_after) %>%
   mutate(win_prob_post=ifelse(di=="h",wp,1-wp),
@@ -231,14 +239,23 @@ bigshots <- wp %>%
          post_c=pmin(pmax(champ_prob_win_post,1e-9),1-1e-9)) %>%
   mutate(champ_prob_kl= post_c*log(post_c/pre_c,base=2) + (1-post_c)*log((1-post_c)/(1-pre_c),base=2)) %>%
   select(-pre_c,-post_c) %>%
-  arrange(desc(champ_prob_change)) %>%
-  slice_head(n=n_shots) %>%
+  # shooter's side of the series record (before this game) and of the score (after this shot)
+  mutate(shooter_wins=ifelse(shooter_top,top_seed_sitch,bottom_seed_sitch),
+         opp_wins=ifelse(shooter_top,bottom_seed_sitch,top_seed_sitch),
+         shooter_pts=ifelse(di=="h",h,a),
+         opp_pts=ifelse(di=="h",a,h),
+         shot_pts=ifelse(pt1=="MK3",3,2)) %>%
   select(ssn, dt, gid, htm, atm, q, min, sec, wp, wpa, m, ma, h, a, d, pid1, fnm, lnm,
          round_lab, rounds_after, best_of, top_seed, top_seed_sitch, bottom_seed_sitch,
+         shooter_wins, opp_wins, shooter_pts, opp_pts, shot_pts,
          starts_with("series_prob"), starts_with("champ_prob"), win_prob_pre, win_prob_post)
 
 # sanity check: every made shot should help the shooter's title odds
-summary(bigshots$champ_prob_change)
+summary(shots$champ_prob_change)
+
+# rank separately, so the KL chart is the top n by KL, not the top n by change re-sorted
+bigshots    <- shots %>% arrange(desc(champ_prob_change)) %>% slice_head(n=n_shots)
+bigshots_kl <- shots %>% arrange(desc(champ_prob_kl)) %>% slice_head(n=n_shots)
 
 library(ggplot2)
 library(dplyr)
@@ -342,19 +359,33 @@ gtsave(tbl_gt, paste0(out_dir, "wnba_championship_leverage_table.png"))     # ne
 # =====================================================================
 bar_col <- "#e6701a"
 
-d <- bigshots |>
-  arrange(desc(champ_prob_kl)) |>
+# Row labels, all from the shooter's side: series record going into the game, score before -> after.
+# The WNBA played two 20-minute halves through 2005, but wpg numbers those periods like quarters
+# (1999/2003 game-enders came out as "Q4"), so label q 1-2 / 3-4 as H1 / H2 and add back the
+# half's first 10 minutes for q 1 and 3. Under a minute show tenths like the scoreboard, rather
+# than truncating (2.9 s used to print as 0:02).
+shot_labels <- function(d) d |>
   mutate(
-    rank   = row_number(),
-    qlab   = ifelse(q > 4, paste0("OT", q - 4), paste0("Q", q)),
-    clock  = sprintf("%d:%02d", as.integer(min), as.integer(floor(sec))),
+    yr     = ssn + yr_offset,
+    halves = yr <= 2005 & q <= 4,
+    period = case_when(q > 4  ~ paste0("OT", q - 4),
+                       halves ~ paste0("H", ceiling(q / 2)),
+                       TRUE   ~ paste0("Q", q)),
+    secs   = min * 60 + sec + ifelse(halves & q %% 2 == 1, 600, 0),
+    clock  = ifelse(secs < 60, sprintf("0:%04.1f", secs),
+                    sprintf("%d:%02d", as.integer(secs %/% 60), as.integer(floor(secs %% 60)))),
     game   = top_seed_sitch + bottom_seed_sitch + 1,
-    series = paste0(top_seed_sitch, "–", bottom_seed_sitch),
-    l1 = paste0(rank, ".  ", fnm, " ", lnm, "   ·   ", ssn + yr_offset),
-    l2 = paste0(round_lab, " G", game, " (", series, ")   ·   ",
-                qlab, " ", clock, "   ·   ", h, "–", a),
+    series = paste0(shooter_wins, "–", opp_wins),
+    score  = paste0(shooter_pts - shot_pts, "–", opp_pts, " → ", shooter_pts, "–", opp_pts),
+    l1 = paste0(rank, ".  ", fnm, " ", lnm, "   ·   ", yr),
+    l2 = paste0(round_lab, " G", game, " (", series, ")  ·  ", period, " ", clock, "  ·  ", score),
     yn = rev(rank)
   )
+
+d <- bigshots_kl |>
+  arrange(desc(champ_prob_kl)) |>
+  mutate(rank = row_number()) |>
+  shot_labels()
 n <- nrow(d)
 
 ggplot(d) +
@@ -393,7 +424,7 @@ ggplot(d) +
     plot.margin = margin(14, 16, 12, 16)
   )
 
-ggsave(paste0(out_dir, "wnba_biggest_shots_kl.png"), width = 10, height = 1.2 + 0.62 * nrow(bigshots), dpi = 300)
+ggsave(paste0(out_dir, "wnba_biggest_shots_kl.png"), width = 10, height = 1.2 + 0.62 * nrow(bigshots_kl), dpi = 300)
 
 # =====================================================================
 # Biggest shots chart with headshots (ranked by title-odds change)
@@ -402,7 +433,7 @@ library(ggpath)
 
 track_col <- "#ececec"
 band_col  <- "#f7f7f7"
-xL <- -1.72; xR <- 1.95
+xL <- -1.72; xR <- 2.02
 kl0 <- 1.24; kl1 <- 1.58
 
 # Players with no usable headshot on the WNBA CDN: add image URL or local path keyed by pid1, e.g.
@@ -415,16 +446,9 @@ d <- bigshots |>
     rank = row_number(),
     headshot_url = paste0("https://cdn.wnba.com/headshots/wnba/latest/1040x760/", pid1, ".png"),
     headshot_url = coalesce(unname(headshot_overrides[as.character(pid1)]), headshot_url),
-    qlab   = ifelse(q > 4, paste0("OT", q - 4), paste0("Q", q)),
-    clock  = sprintf("%d:%02d", as.integer(min), as.integer(floor(sec))),
-    game   = top_seed_sitch + bottom_seed_sitch + 1,
-    series = paste0(top_seed_sitch, "–", bottom_seed_sitch),
-    l1 = paste0(rank, ".  ", fnm, " ", lnm, "   ·   ", ssn + yr_offset),
-    l2 = paste0(round_lab, " G", game, " (", series, ")   ·   ",
-                qlab, " ", clock, "   ·   ", h, "–", a),
-    klfrac = champ_prob_change / max(champ_prob_change),
-    yn = rev(rank)
-  )
+    chg_frac = champ_prob_change / max(champ_prob_change)
+  ) |>
+  shot_labels()
 n <- nrow(d)
 
 ggplot(d) +
@@ -443,13 +467,13 @@ ggplot(d) +
             hjust = 0, size = 5.2, fontface = "bold", color = "grey20") +
   geom_segment(aes(x = kl0, xend = kl1, y = yn, yend = yn),
                color = track_col, linewidth = 6.6, lineend = "round") +
-  geom_segment(aes(x = kl0, xend = kl0 + klfrac * (kl1 - kl0), y = yn, yend = yn),
+  geom_segment(aes(x = kl0, xend = kl0 + chg_frac * (kl1 - kl0), y = yn, yend = yn),
                color = "#a63603", linewidth = 6.6, lineend = "round") +
-  geom_text(aes(x = kl1 + 0.05, y = yn, label = sprintf("%.3f", champ_prob_change)),
+  geom_text(aes(x = kl1 + 0.05, y = yn, label = sprintf("%+.1f pts", 100 * champ_prob_change)),
             hjust = 0, size = 5.2, fontface = "bold", color = "#7a2602") +
   annotate("text", x = 0.42, y = n + 0.95, label = "Championship odds:  before → after",
            hjust = 0.5, fontface = "bold", size = 5.4, color = "grey30") +
-  annotate("text", x = (kl0 + kl1) / 2, y = n + 0.95, label = "Title Prob Chg",
+  annotate("text", x = (kl0 + kl1) / 2, y = n + 0.95, label = "Title-odds swing",
            hjust = 0.5, fontface = "bold", size = 5.4, color = "grey30") +
   scale_x_continuous(breaks = c(0, .25, .5, .75, 1), labels = percent, limits = c(xL, xR)) +
   scale_y_continuous(expand = expansion(add = c(0.55, 0.75))) +
