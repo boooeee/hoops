@@ -20,7 +20,7 @@ out_dir     <- "~/Dropbox/Nba/"    # outputs are prefixed "wnba_" so NBA files a
 yr_offset   <- 0                   # WNBA ssn should be the calendar year (2025 Finals -> ssn 2025).
                                    # If your WNBA ssn is stored like the NBA (start year), set to 1.
 po_prefix   <- "104"               # WNBA playoff gid prefix (excludes Commissioner's Cup etc.)
-incomplete_yr <- 2026              # season whose playoffs are still in progress; set to NA once the Finals end
+incomplete_yr <- 2026              # season whose playoffs are still in progress (unfinished series allowed); NA once the Finals end
 n_shots     <- 10                  # rows kept in bigshots
 min_minutes <- 300                 # top_shooters plot cutoff (WNBA playoff careers are shorter)
 
@@ -54,13 +54,59 @@ series_win <- expand_grid(best_of = c(1, 3, 5, 7), wins = 0:3, opp_wins = 0:3) %
   select(-target)
 
 # =====================================================================
-# 2. Playoff games -> series -> format, derived from the data
-#    best_of      = from the series winner's win total
-#    rounds_after = 0 for the Finals; otherwise 1 + rounds_after of the
-#                   next series the winner plays (handles byes & conferences)
+# 2. Playoff games -> series -> round and format
+#    The format comes from the league's rules for each season (po_rules), not
+#    from how many games gms has, so a series with games missing still gets
+#    the right format. A series' round comes from the bracket: 1 + the round
+#    of the previous series either team played that season.
 # =====================================================================
+po_rules <- tribble(
+  ~from, ~to, ~round, ~best_of, ~round_lab,
+  1997, 1997, 1, 1, "SF",          # 4 teams, single games
+  1997, 1997, 2, 1, "Finals",
+  1998, 1998, 1, 3, "SF",
+  1998, 1998, 2, 3, "Finals",
+  1999, 1999, 1, 1, "R1",          # conference #1 seeds had byes
+  1999, 1999, 2, 3, "CF",
+  1999, 1999, 3, 3, "Finals",
+  2000, 2004, 1, 3, "CSF",
+  2000, 2004, 2, 3, "CF",
+  2000, 2004, 3, 3, "Finals",
+  2005, 2015, 1, 3, "CSF",
+  2005, 2015, 2, 3, "CF",
+  2005, 2015, 3, 5, "Finals",
+  2016, 2021, 1, 1, "R1",          # single elimination; top four seeds had byes
+  2016, 2021, 2, 1, "R2",
+  2016, 2021, 3, 5, "SF",
+  2016, 2021, 4, 5, "Finals",
+  2022, 2024, 1, 3, "R1",
+  2022, 2024, 2, 5, "SF",
+  2022, 2024, 3, 5, "Finals",
+  2025, Inf,  1, 3, "R1",          # set `to` and add rows if the format changes again
+  2025, Inf,  2, 5, "SF",
+  2025, Inf,  3, 7, "Finals"
+) %>%
+  group_by(from) %>%
+  mutate(rounds_after = as.integer(max(round) - round)) %>%
+  ungroup()
+
+# Games gms is missing. Each result sets the series score for every later game in its
+# series, so they're added here; a row is skipped once gms has that game.
+missing_games <- tribble(
+  ~yr,  ~dt,          ~htm,  ~atm,  ~hscr, ~ascr,
+  2004, "2004-09-29", "CON", "WAS",  76,    56,     # East semis G3
+  2006, "2006-08-26", "LAS", "SAC",  58,    72,     # West finals G2
+  2021, "2021-10-10", "PHO", "CHI",  77,    91,     # Finals G1
+  2022, "2022-08-24", "DAL", "CON",  58,    73,     # First round G3
+  2022, "2022-08-28", "CHI", "CON",  63,    68      # Semis G1
+) %>%
+  mutate(ssn = as.integer(yr - yr_offset), dt = as_date(dt), gid = paste("manual", dt, htm, sep = "_")) %>%
+  select(-yr)
+
 po <- sqlf("SELECT * FROM gms WHERE po=1") %>%
-  filter(substr(gid,1,3)==po_prefix)
+  filter(substr(gid,1,3)==po_prefix) %>%
+  mutate(dt = as_date(dt))
+po <- bind_rows(po, anti_join(missing_games, po, join_by(ssn, dt, htm, atm)))
 
 po_series <- po %>%
   select(ssn, gid, dt, htm, atm, hscr, ascr) %>%
@@ -73,96 +119,56 @@ po_series <- po %>%
   mutate(top_seed_wins=cumsum(top_seed_won),bottom_seed_wins=cumsum(bottom_seed_won)) %>%
   ungroup()
 
-series_outcome <- po_series %>%
-  group_by(series_teams) %>%
-  slice_tail(n=1) %>%
+series <- po_series %>%
+  group_by(ssn, series_teams) %>%
+  summarise(top_seed = first(top_seed), bottom_seed = first(atm),
+            start_date = first(start_date), end_date = first(end_date), games = n(),
+            top_seed_wins = last(top_seed_wins), bottom_seed_wins = last(bottom_seed_wins), .groups = "drop")
+
+# each team's previous series that season, if it had one
+team_series <- series %>%
+  pivot_longer(c(top_seed, bottom_seed), values_to = "team") %>%
+  select(ssn, series_teams, team, start_date, end_date)
+prev_series <- team_series %>%
+  inner_join(select(team_series, ssn, team, prev_teams = series_teams, prev_end = end_date),
+             join_by(ssn, team, start_date > prev_end)) %>%
+  group_by(series_teams, team) %>%
+  slice_max(prev_end, n = 1) %>%
   ungroup() %>%
-  mutate(bottom_seed   = ifelse(top_seed==htm, atm, htm),
-         series_winner = ifelse(top_seed_wins > bottom_seed_wins, top_seed, bottom_seed),
-         wins_needed   = pmax(top_seed_wins, bottom_seed_wins),
-         best_of       = 2*wins_needed - 1) %>%
-  group_by(ssn) %>%
-  mutate(rounds_after = ifelse(start_date==max(start_date), 0L, NA_integer_)) %>%   # Finals
-  ungroup() %>%
-  select(ssn, series_teams, htm, atm, start_date, end_date, series_winner, best_of, rounds_after)
+  select(series_teams, prev_teams)
 
-# next series each winner played
-next_series <- series_outcome %>%
-  select(ssn, series_teams, end_date, series_winner) %>%
-  inner_join(select(series_outcome, ssn, next_teams=series_teams, next_start=start_date, t1=htm, t2=atm),
-             join_by(ssn), relationship="many-to-many") %>%
-  filter(next_start > end_date, series_winner==t1 | series_winner==t2) %>%
-  group_by(series_teams) %>%
-  slice_min(next_start, n=1) %>%
-  ungroup() %>%
-  select(series_teams, next_teams)
-
-series_outcome <- left_join(series_outcome, next_series, join_by(series_teams))
-for (i in 1:5) {   # walk back from the Finals; 5 passes covers any WNBA bracket
-  series_outcome <- series_outcome %>%
-    left_join(select(series_outcome, next_teams=series_teams, ra_next=rounds_after), join_by(next_teams)) %>%
-    mutate(rounds_after = coalesce(rounds_after, ra_next + 1L)) %>%
-    select(-ra_next)
-}
-
-# round labels by era
-round_name <- function(yr, ra) case_when(
-  ra == 0                     ~ "Finals",
-  ra == 1 & yr %in% 1999:2015 ~ "CF",
-  ra == 1                     ~ "SF",
-  ra == 2 & yr %in% 2000:2015 ~ "CSF",
-  ra == 2 & yr %in% 2016:2021 ~ "R2",
-  TRUE                        ~ "R1"
-)
-
-# known format history - used as a check, and to fill in the in-progress season
-expected_best_of <- function(yr, ra) case_when(
-  yr == 1997 ~ 1,                              # all single games
-  yr == 1998 ~ 3,                              # SF Bo3, F Bo3
-  yr == 1999 ~ if_else(ra == 2, 1, 3),         # 1-game first round, Bo3 after
-  yr <= 2004 ~ 3,                              # all Bo3
-  yr <= 2015 ~ if_else(ra == 0, 5, 3),         # Bo3 conf rounds, Bo5 Finals
-  yr <= 2021 ~ if_else(ra >= 2, 1, 5),         # 2 single-elim rounds w/ byes, Bo5 SF/F
-  yr <= 2024 ~ if_else(ra == 2, 3, 5),         # Bo3 R1, Bo5 SF/F
-  TRUE       ~ c(7, 5, 3)[ra + 1]              # 2025+: Bo3 R1, Bo5 SF, Bo7 F
-)
-
-# In-progress season: the data-driven method breaks because the latest-starting
-# series isn't the Finals yet (both semis get flagged as Finals) and unfinished
-# series undercount best_of. Since 2022 the bracket has no byes, so a series' round
-# = 1 + number of series its teams already finished that season (3 rounds total).
-if (!is.na(incomplete_yr)) {
-  cur <- filter(series_outcome, ssn + yr_offset == incomplete_yr)
-  round_idx <- cur %>%
-    select(series_teams, start_date, htm) %>%
-    cross_join(select(cur, prev_end = end_date, p1 = htm, p2 = atm)) %>%
+# round = 1 + the round of either team's previous series. Not a count of series played:
+# teams with byes (1999 Finals, 2016-2021 SF/Finals) would come out a round too early.
+series_round <- distinct(series, series_teams) %>% mutate(round = 1L)
+for (i in 1:4) {   # 4 passes covers the deepest (4-round) bracket
+  series_round <- series_round %>%
+    left_join(prev_series, join_by(series_teams)) %>%
+    left_join(select(series_round, prev_teams = series_teams, prev_round = round), join_by(prev_teams)) %>%
     group_by(series_teams) %>%
-    summarise(round_idx = 1 + sum(prev_end < start_date & (htm == p1 | htm == p2)), .groups = "drop")
-  series_outcome <- series_outcome %>%
-    left_join(round_idx, join_by(series_teams)) %>%
-    mutate(rounds_after = ifelse(ssn + yr_offset == incomplete_yr, as.integer(3 - round_idx), rounds_after),
-           best_of = ifelse(ssn + yr_offset == incomplete_yr,
-                            expected_best_of(ssn + yr_offset, rounds_after), best_of)) %>%
-    select(-round_idx)
+    summarise(round = 1L + max(coalesce(prev_round, 0L)))
 }
-if (anyNA(series_outcome$rounds_after)) warning("Some series have no rounds_after - check incomplete_yr")
 
-series_outcome <- series_outcome %>%
-  mutate(yr = ssn + yr_offset,
-         round_lab = round_name(yr, rounds_after),
-         expected  = expected_best_of(yr, rounds_after))
-
-# A finished series whose winner has fewer wins than the format needs is missing games in
-# gms, and every game after the gap gets the wrong series score. (2021 Finals G1 missing ->
-# G4 charted as a winner-take-all "G3 (1-1)" of a Bo3.) Stop rather than chart bad numbers.
-# A missing Finals shows up here too: the semis get treated as the Finals, so the round
-# before them is flagged (e.g. 2023 first-round series showing rounds_after = 1).
-format_check <- filter(series_outcome, is.na(expected) | best_of != expected)
+series_outcome <- series %>%
+  left_join(series_round, join_by(series_teams)) %>%
+  mutate(yr = ssn + yr_offset) %>%
+  left_join(po_rules, join_by(between(yr, from, to), round)) %>%
+  select(-from, -to) %>%
+  mutate(wins_needed   = (best_of + 1) / 2,
+         series_winner = case_when(top_seed_wins == wins_needed ~ top_seed,
+                                   bottom_seed_wins == wins_needed ~ bottom_seed))
 print(count(series_outcome, yr, round_lab, best_of), n = 200)
+
+# A finished series needs a winner with exactly wins_needed wins. Fewer means games are still
+# missing, and every later game in that series would get the wrong series score (2021 Finals
+# G1 missing put G4 on the chart as "G3 (1-1)"). More means a game is in gms twice.
+format_check <- series_outcome %>%
+  mutate(most_wins = pmax(top_seed_wins, bottom_seed_wins)) %>%
+  filter(is.na(best_of) | most_wins > wins_needed | (most_wins < wins_needed & !yr %in% incomplete_yr))
 if (nrow(format_check) > 0) {
-  print(format_check)
-  stop("Series above don't match the known playoff format - most likely games missing from gms. ",
-       "Backfill them (and their box/wpg rows) and re-run.")
+  print(select(format_check, ssn, series_teams, round_lab, start_date, end_date, games,
+               top_seed, top_seed_wins, bottom_seed_wins, best_of), width = Inf)
+  stop("Series above don't fit the playoff rules - add the games gms is missing to missing_games ",
+       "(or remove duplicates), or update po_rules if the format is wrong.")
 }
 
 po_situation <- po_series %>%
