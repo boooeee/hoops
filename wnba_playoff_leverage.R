@@ -153,8 +153,10 @@ series_outcome <- series_outcome %>%
          expected  = expected_best_of(yr, rounds_after))
 
 # A finished series whose winner has fewer wins than the format needs is missing games in
-# gms, and every game after the gap gets the wrong series score. (2021 Finals G3 missing ->
+# gms, and every game after the gap gets the wrong series score. (2021 Finals G1 missing ->
 # G4 charted as a winner-take-all "G3 (1-1)" of a Bo3.) Stop rather than chart bad numbers.
+# A missing Finals shows up here too: the semis get treated as the Finals, so the round
+# before them is flagged (e.g. 2023 first-round series showing rounds_after = 1).
 format_check <- filter(series_outcome, is.na(expected) | best_of != expected)
 print(count(series_outcome, yr, round_lab, best_of), n = 200)
 if (nrow(format_check) > 0) {
