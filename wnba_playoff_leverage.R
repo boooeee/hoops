@@ -22,6 +22,7 @@ yr_offset   <- 0                   # WNBA ssn should be the calendar year (2025 
 po_prefix   <- "104"               # WNBA playoff gid prefix (excludes Commissioner's Cup etc.)
 incomplete_yr <- 2026              # season whose playoffs are still in progress (unfinished series allowed); NA once the Finals end
 n_shots     <- 10                  # rows kept in bigshots
+n_shots_long <- 25                 # rows on the long board (one line per shot)
 board_text_scale <- 1.2            # type size on the biggest-shots boards (1 = compact, 1.5 = large);
                                    # the layout re-fits around it
 min_minutes <- 300                 # top_shooters plot cutoff (WNBA playoff careers are shorter)
@@ -561,24 +562,37 @@ wrap_in <- function(x, pt, width, bold = FALSE) {
 # d: one row per shot, ranked, with shot_labels() columns plus value_label.
 # Each row is [rank | headshot | name over one detail line | before -> after track | swing]:
 # the track has a column of its own, clear of the text, with full-height quarter
-# gridlines. Returns list(plot, width, height) in inches, so the PNG is drawn at exactly
-# that size.
-shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE) {
+# gridlines. compact = TRUE (for long lists) puts each shot on one line instead, with
+# Player / Game / Shot columns under headers. Returns list(plot, width, height) in inches,
+# so the PNG is drawn at exactly that size.
+shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE, compact = FALSE) {
   n <- nrow(d)
   k  <- board_text_scale
-  sz <- lapply(list(rank = 32, name = 24, detail = 17, pre = 16, post = 18, value = 25,
-                    head = 16, axis = 15.5, title = 38, sub = 18.5, cap = 15), `*`, k)
+  sz <- lapply(if (compact)
+                 list(rank = 22, name = 19, detail = 15, pre = 14, post = 15.5, value = 19,
+                      head = 15, axis = 15, title = 38, sub = 18.5, cap = 15)
+               else
+                 list(rank = 32, name = 24, detail = 17, pre = 16, post = 18, value = 25,
+                      head = 16, axis = 15.5, title = 38, sub = 18.5, cap = 15), `*`, k)
   LH <- function(p) p / 72 * 1.3                                      # line height, inches
   name_h <- sz$name * 1.22 / 72; det_h <- sz$detail * 1.3 / 72
-  ROW_H  <- name_h + det_h + 0.18                                     # two text lines + padding
-  AV     <- ROW_H - 0.16                                              # headshot circle diameter
-  M <- 0.5; TRACK_W <- 4.8; GAP_V <- 0.6                              # GAP_V: post label -> values
-  d <- d |> mutate(detail_txt = paste0(stage_txt, " \u00b7 ", play_txt))
+  ROW_H  <- if (compact) name_h + 0.26 else name_h + det_h + 0.18     # one or two text lines + padding
+  AV     <- ROW_H - if (compact) 0.1 else 0.16                         # headshot circle diameter
+  mk     <- k * if (compact) 0.8 else 1                               # dot and line sizes
+  M <- 0.5; TRACK_W <- 4.8; GAP_V <- 0.6; GAP_C <- 0.45                # GAP_V: post label -> values;
+  d <- d |> mutate(detail_txt = paste0(stage_txt, " \u00b7 ", play_txt))   # GAP_C: between columns
 
-  x_rank <- M + text_in("10", sz$rank, TRUE)                          # rank numbers right-aligned here
+  x_rank <- M + max(text_in(as.character(d$rank), sz$rank, TRUE))     # rank numbers right-aligned here
   x_av   <- x_rank + 0.26 + AV / 2
   x_text <- if (headshots) x_av + AV / 2 + 0.26 else x_rank + 0.32
-  text_w <- max(text_in(d$name, sz$name, TRUE), text_in(d$detail_txt, sz$detail))
+  if (compact) {                                                      # Player | Game | Shot columns
+    hdr    <- c(name = "Player", game = "Game", shot = "Shot")
+    x_game <- x_text + max(text_in(c(d$name, hdr[["name"]]), sz$name, TRUE)) + GAP_C
+    x_shot <- x_game + max(text_in(d$stage_txt, sz$detail), text_in(hdr[["game"]], sz$head, TRUE)) + GAP_C
+    text_w <- x_shot + max(text_in(d$play_txt, sz$detail), text_in(hdr[["shot"]], sz$head, TRUE)) - x_text
+  } else {
+    text_w <- max(text_in(d$name, sz$name, TRUE), text_in(d$detail_txt, sz$detail))
+  }
   x0     <- x_text + text_w + text_in("100.0%", sz$pre) + 0.35 + 0.14 * k   # 0% sits past the widest pre label
   x1     <- x0 + TRACK_W                                              # 100%
   val_w  <- max(text_in(d$value_label, sz$value, TRUE), lines_in(value_head, sz$head, TRUE))
@@ -612,14 +626,10 @@ shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE
               size = pt(sz$axis), colour = INK_SOFT, vjust = 1) +
     geom_text(aes(x = x_rank, y = y, label = rank), hjust = 1, size = pt(sz$rank),
               fontface = "bold", colour = INK_SOFT) +
-    geom_text(aes(x = x_text, y = y + det_h / 2, label = name), hjust = 0, size = pt(sz$name),
-              fontface = "bold", colour = INK) +
-    geom_text(aes(x = x_text, y = y - name_h / 2, label = detail_txt), hjust = 0, size = pt(sz$detail),
-              colour = INK_SOFT) +
     geom_segment(aes(x = x_pre, xend = x_post, y = y, yend = y),
-                 colour = ACCENT, linewidth = 3 * k, lineend = "round") +
-    geom_point(aes(x = x_pre, y = y), shape = 21, size = 4.8 * k, stroke = 1.8 * k, fill = PAPER, colour = ACCENT) +
-    geom_point(aes(x = x_post, y = y), shape = 21, size = 6.6 * k, stroke = 1.3 * k, fill = ACCENT, colour = PAPER) +
+                 colour = ACCENT, linewidth = 3 * mk, lineend = "round") +
+    geom_point(aes(x = x_pre, y = y), shape = 21, size = 4.8 * mk, stroke = 1.8 * mk, fill = PAPER, colour = ACCENT) +
+    geom_point(aes(x = x_post, y = y), shape = 21, size = 6.6 * mk, stroke = 1.3 * mk, fill = ACCENT, colour = PAPER) +
     pct_label(aes(x = x_pre - 0.14 * k, y = y, label = percent(champ_prob_win_pre, 0.1), fill = I(row_bg)),
               hjust = 1, size = pt(sz$pre), colour = INK_SOFT) +
     pct_label(aes(x = x_post + 0.16 * k, y = y, label = percent(champ_prob_win_post, 0.1), fill = I(row_bg)),
@@ -640,6 +650,20 @@ shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE
     theme_void(base_family = FONT) +
     theme(plot.background = element_rect(fill = PAPER, colour = NA), plot.margin = margin(0))
 
+  g <- g + if (compact) list(
+    geom_text(aes(x = x_text, y = y, label = name), hjust = 0, size = pt(sz$name),
+              fontface = "bold", colour = INK),
+    geom_text(aes(x = x_game, y = y, label = stage_txt), hjust = 0, size = pt(sz$detail), colour = INK_SOFT),
+    geom_text(aes(x = x_shot, y = y, label = play_txt), hjust = 0, size = pt(sz$detail), colour = INK_SOFT),
+    annotate("text", x = c(x_text, x_game, x_shot), y = rows_top + 0.16, label = unname(hdr),
+             hjust = 0, vjust = 0, size = pt(sz$head), fontface = "bold", colour = INK_SOFT)
+  ) else list(
+    geom_text(aes(x = x_text, y = y + det_h / 2, label = name), hjust = 0, size = pt(sz$name),
+              fontface = "bold", colour = INK),
+    geom_text(aes(x = x_text, y = y - name_h / 2, label = detail_txt), hjust = 0, size = pt(sz$detail),
+              colour = INK_SOFT)
+  )
+
   if (headshots) {
     paths <- vapply(seq_len(n), function(i) headshot_path(d$pid1[i], d$name[i]), character(1))
     imgs  <- lapply(paths, read_headshot)
@@ -655,7 +679,7 @@ shot_board <- function(d, value_head, title, subtitle, caption, headshots = TRUE
       g <- g +
         geom_polygon(data = tiles, aes(x = cx, y = cy, group = rank), fill = AVATAR_BG, colour = NA) +
         geom_text(data = distinct(tiles, rank, y, initials), aes(x = x_av, y = y, label = initials),
-                  size = pt(20 * k), fontface = "bold", colour = INK_SOFT)
+                  size = pt(AV * 72 * 0.36), fontface = "bold", colour = INK_SOFT)
       cat("No headshot (initials tile) for:", paste0(d$name[missing], " [pid ", d$pid1[missing], "]", collapse = ", "),
           "\n  -> add an image named by pid or name to headshot_files, e.g.",
           paste0(d$pid1[missing][1], ".png or '", d$name[missing][1], ".jpg'\n"))
@@ -700,3 +724,20 @@ print(as_tibble(select(d, rank, name, detail, champ_prob_win_pre, champ_prob_win
 write.csv(select(d, rank, name, detail, ssn, dt, gid, pid1, q, min, sec, wp, wpa,
                  champ_prob_win_pre, champ_prob_win_post, champ_prob_change),
           paste0(out_dir, "wnba_biggest_shots.csv"), row.names = FALSE)
+
+# ---- Top n_shots_long, one line per shot ------------------------------------
+d_long <- shots |>
+  arrange(desc(champ_prob_change)) |>
+  slice_head(n = n_shots_long) |>
+  mutate(rank = row_number(), value_label = sprintf("%+.1f", 100 * champ_prob_change)) |>
+  shot_labels()
+board_long <- shot_board(d_long, value_head = "Swing\n(pct. pts)", compact = TRUE,
+                         title = paste("The", n_shots_long, "biggest shots in WNBA history"),
+                         subtitle = "Made shots ranked by how much they raised their team's title odds",
+                         caption = board_caption)
+preview(board_long$plot)
+save_png(board_long$plot, sprintf("wnba_biggest_shots_top%d.png", n_shots_long),
+         width = board_long$width, height = board_long$height)
+write.csv(select(d_long, rank, name, detail, ssn, dt, gid, pid1, q, min, sec, wp, wpa,
+                 champ_prob_win_pre, champ_prob_win_post, champ_prob_change),
+          paste0(out_dir, sprintf("wnba_biggest_shots_top%d.csv", n_shots_long)), row.names = FALSE)
