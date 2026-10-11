@@ -16,7 +16,7 @@ library(tidyverse)
 # SETTINGS - check these first
 # =====================================================================
 db_name     <- "wnba"              # MySQL database holding WNBA gms / wpg / box / player
-out_dir     <- "~/Dropbox/Nba/"    # outputs are prefixed "wnba_" so NBA files aren't overwritten
+out_dir     <- "~/Dropbox/wnba/"   # where the PNGs and CSV are written (plus fonts/ and headshot_cache/)
 yr_offset   <- 0                   # WNBA ssn should be the calendar year (2025 Finals -> ssn 2025).
                                    # If your WNBA ssn is stored like the NBA (start year), set to 1.
 po_prefix   <- "104"               # WNBA playoff gid prefix (excludes Commissioner's Cup etc.)
@@ -25,13 +25,22 @@ n_shots     <- 10                  # rows kept in bigshots
 board_text_scale <- 1.2            # type size on the biggest-shots boards (1 = compact, 1.5 = large);
                                    # the layout re-fits around it
 min_minutes <- 300                 # top_shooters plot cutoff (WNBA playoff careers are shorter)
-headshot_files <- paste0(out_dir, "wnba_headshots/")  # your own headshots: a folder, or image files, or
+headshot_files <- out_dir          # your own headshots: a folder, or image files, or
                                    # both; each named by pid1 ("100639.png") or player name ("Deanna Nolan.jpg").
                                    # These beat every other source.
 
+# MySQL login comes from ~/.Renviron, same variables as the WNBA win-probability scripts:
+#   WNBA_DB_USER=root   (optional, defaults to root)
+#   WNBA_DB_PASS=...
+# Re-read here so an edit to ~/.Renviron is picked up without restarting R.
+if (file.exists("~/.Renviron")) readRenviron("~/.Renviron")
+if (!nzchar(Sys.getenv("WNBA_DB_PASS")))
+  message("WNBA_DB_PASS is not set in ~/.Renviron - connecting to MySQL with an empty password")
+
 sqlf<-function(x) {
   drv <- dbDriver("MySQL")
-  con <- dbConnect(drv, username="root", password="", dbname=db_name, host="localhost", port=3306)
+  con <- dbConnect(drv, username=Sys.getenv("WNBA_DB_USER", "root"), password=Sys.getenv("WNBA_DB_PASS"),
+                   dbname=db_name, host="localhost", port=3306)
   out<-dbGetQuery(con,x)
   dbDisconnect(con)
   return(out)
@@ -480,6 +489,7 @@ IMAGE_EXT   <- "\\.(png|jpe?g|webp|gif)$"
 local_heads <- unlist(lapply(path.expand(headshot_files), function(p)
   if (dir.exists(p)) list.files(p, pattern = IMAGE_EXT, ignore.case = TRUE, full.names = TRUE)
   else if (file.exists(p)) p))
+local_heads <- local_heads[!startsWith(basename(local_heads), "wnba_")]   # this script's own outputs
 local_keys  <- name_key(tools::file_path_sans_ext(basename(local_heads)))
 gone <- headshot_files[!file.exists(path.expand(headshot_files))]
 if (length(gone)) message("headshot_files not found: ", paste(gone, collapse = ", "))
