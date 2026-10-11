@@ -26,7 +26,7 @@ n_shots_long <- 25                 # rows on the long board (one line per shot)
 board_text_scale <- 1.2            # type size on the biggest-shots boards (1 = compact, 1.5 = large);
                                    # the layout re-fits around it
 min_minutes <- 300                 # top_shooters plot cutoff (WNBA playoff careers are shorter)
-headshot_files <- out_dir          # your own headshots: a folder, or image files, or
+headshot_files <- paste0(out_dir, "wnba_headshots/")  # your own headshots: a folder, or image files, or
                                    # both; each named by pid1 ("100639.png") or player name ("Deanna Nolan.jpg").
                                    # These beat every other source.
 
@@ -490,7 +490,6 @@ IMAGE_EXT   <- "\\.(png|jpe?g|webp|gif)$"
 local_heads <- unlist(lapply(path.expand(headshot_files), function(p)
   if (dir.exists(p)) list.files(p, pattern = IMAGE_EXT, ignore.case = TRUE, full.names = TRUE)
   else if (file.exists(p)) p))
-local_heads <- local_heads[!startsWith(basename(local_heads), "wnba_")]   # this script's own outputs
 local_keys  <- name_key(tools::file_path_sans_ext(basename(local_heads)))
 gone <- headshot_files[!file.exists(path.expand(headshot_files))]
 if (length(gone)) message("headshot_files not found: ", paste(gone, collapse = ", "))
