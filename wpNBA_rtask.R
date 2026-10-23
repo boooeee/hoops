@@ -4,12 +4,113 @@ library(XML)
 library(RJSONIO)
 library(RMySQL)
 library(segmented)
-library(httr)
+library(httr2)
 library(urltools)
 library(dplyr)
 library(lubridate)
 library(tidyr)
 library(purrr)
+
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
+# ── HTTP helpers ──────────────────────────────────────────────────────────────
+# Same approach as the WNBA script. cdn.nba.com answers the spoofed Chrome
+# headers with 403s, so CDN requests go out plain, with httr2's own user agent.
+# The browser headers are only sent to stats.nba.com, which wants them.
+# Responses are still parsed with RJSONIO, so every list downstream keeps the
+# shape the parsing code was written against.
+cdn_get <- function(url) {
+  request(url) |>
+    req_timeout(60) |>
+    req_retry(max_tries = 3, backoff = \(i) 5 * i) |>
+    req_perform() |>
+    resp_body_string() |>
+    RJSONIO::fromJSON()
+}
+
+# NULL instead of an error, so one missing game doesn't stop the run
+cdn_try <- function(url) {
+  tryCatch(cdn_get(url), error = function(e) {
+    message("CDN failed (", basename(url), "): ", conditionMessage(e))
+    NULL
+  })
+}
+
+nba_get <- function(url, query = list()) {
+  request(url) |>
+    req_headers(
+      "User-Agent"         = paste0("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ",
+                                    "AppleWebKit/537.36 (KHTML, like Gecko) ",
+                                    "Chrome/131.0.0.0 Safari/537.36"),
+      "Accept"             = "application/json, text/plain, */*",
+      "Accept-Encoding"    = "gzip, deflate, br",
+      "Accept-Language"    = "en-US,en;q=0.9",
+      "Referer"            = "https://www.nba.com/",
+      "Origin"             = "https://www.nba.com",
+      "x-nba-stats-origin" = "stats",
+      "x-nba-stats-token"  = "true",
+      "Sec-Fetch-Dest"     = "empty",
+      "Sec-Fetch-Mode"     = "cors",
+      "Sec-Fetch-Site"     = "same-site",
+      "sec-ch-ua"          = '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+      "sec-ch-ua-mobile"   = "?0",
+      "sec-ch-ua-platform" = '"macOS"',
+      "Connection"         = "keep-alive"
+    ) |>
+    req_url_query(!!!query) |>
+    req_timeout(60) |>
+    req_retry(max_tries = 4, backoff = \(i) 10 * i) |>
+    req_perform() |>
+    resp_body_string() |>
+    RJSONIO::fromJSON()
+}
+
+pbp_url <- function(gid) paste0("https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_", gid, ".json")
+box_url <- function(gid) paste0("https://cdn.nba.com/static/json/liveData/boxscore/boxscore_", gid, ".json")
+
+# Try each CDN copy of the league schedule, then stats.nba.com as a last
+# resort (same leagueSchedule layout, but often blocked).
+fetch_schedule <- function(ssnf) {
+  cdn_urls <- c(
+    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json",
+    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_2.json",
+    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
+  )
+  for (u in cdn_urls) {
+    sched <- cdn_try(u)
+    if (!is.null(sched)) {
+      message("Schedule from ", basename(u))
+      return(sched)
+    }
+  }
+  message("All CDN schedule files failed; trying stats.nba.com (may time out)...")
+  nba_get("https://stats.nba.com/stats/scheduleleaguev2",
+          list(Season = ssnf, LeagueID = "00"))
+}
+
+# ── Database helpers ──────────────────────────────────────────────────────────
+# Logins come from ~/.Renviron. Each NBA_ variable falls back to its WNBA_
+# twin, so the .Renviron set up for the WNBA scripts works here as is.
+# Re-read here so an edit to ~/.Renviron is picked up without restarting R.
+if (file.exists("~/.Renviron")) readRenviron("~/.Renviron")
+
+db_local <- function() {
+  dbConnect(RMySQL::MySQL(),
+    username = Sys.getenv("NBA_DB_USER", Sys.getenv("WNBA_DB_USER", "root")),
+    password = Sys.getenv("NBA_DB_PASS", Sys.getenv("WNBA_DB_PASS")),
+    dbname   = "nba",
+    host     = "localhost",
+    port     = 3306L)
+}
+
+db_remote_new <- function() {
+  dbConnect(RMySQL::MySQL(),
+    username = Sys.getenv("NBA_DB_REMOTE_USER", Sys.getenv("WNBA_DB_REMOTE_USER", "boooeee_rupdate")),
+    password = Sys.getenv("NBA_DB_REMOTE_PASS_NEW", Sys.getenv("WNBA_DB_REMOTE_PASS_NEW")),
+    dbname   = "boooeee_nba",
+    host     = Sys.getenv("NBA_DB_IP_NEW", Sys.getenv("WNBA_DB_IP_NEW")),
+    port     = 3306L)
+}
 
 wrap_function<- function() {
   fromJSON<-RJSONIO::fromJSON
@@ -25,8 +126,6 @@ wrap_function<- function() {
   locl<-"/Users/boooeee/Dropbox/Nba/"
   # latest season #
   lssn<-2026
-  ip<-""
-  #ip<-""
   ssn<-2026
   ssnf<-paste(ssn,substr(ssn+1,3,4),sep="-")
   mxgms<-250
@@ -69,8 +168,7 @@ wrap_function<- function() {
             "CHH","VAN","NOK")  
   
   sqlf<-function(x) {
-    drv <- dbDriver("MySQL")
-    con <- dbConnect(drv, username="root", password="", dbname="nba", host="localhost", port=3306)
+    con <- db_local()
     out<-dbGetQuery(con,x)
     dbDisconnect(con)
     return(out)
@@ -153,41 +251,8 @@ wrap_function<- function() {
   }
   if (update) {
     # Pull from new NBA static JSON feed - single call gets all games
-    nba_headers <- c(
-      "User-Agent" = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      "Accept" = "*/*",
-      "Accept-Language" = "en-US,en;q=0.9",
-      "Accept-Encoding" = "gzip, deflate, br",
-      "Referer" = "https://www.nba.com/",
-      "Origin"  = "https://www.nba.com",
-      "Connection" = "keep-alive"
-    )
-    
-    urls <- c(
-      "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json",
-      "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_2.json",
-      "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
-    )
-    
-    urlsb <- NULL
-    for (u in urls) {
-      resp <- tryCatch(
-        RETRY("GET", url = u, times = 3,
-              add_headers(.headers = nba_headers),
-              timeout(15)),
-        error = function(e) NULL
-      )
-      if (!is.null(resp) && status_code(resp) == 200) {
-        urlsb <- resp
-        message("Success: ", u)
-        break
-      }
-    }
-    
-    if (is.null(urlsb)) stop("All CDN endpoints returned non-200")
-    
-    sb <- fromJSON(rawToChar(urlsb$content), simplifyVector = FALSE)
-    
+    sb <- fetch_schedule(ssnf)
+
     # Extract game dates array
     game_dates <- sb$leagueSchedule$gameDates
     
@@ -285,8 +350,7 @@ wrap_function<- function() {
   
   if (!replace) {
     # eliminate games that are already in database #
-    drv <- dbDriver("MySQL")
-    con <- dbConnect(drv, username="root", password="", dbname="nba", host="localhost", port=3306)
+    con <- db_local()
     curid<-dbGetQuery(con,paste("select DISTINCT gid from gms WHERE ssn=",ssn,sep=""))
     dbDisconnect(con)
     
@@ -302,42 +366,12 @@ wrap_function<- function() {
   boxsmpo.lst<-vector('list')
   if (update) {
     # load new play by play data #
-    library(httr)
-    library(jsonlite)
-    
-    nba_headers <- c(
-      "User-Agent" = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      "Accept" = "*/*",
-      "Accept-Language" = "en-US,en;q=0.9",
-      "Accept-Encoding" = "gzip, deflate, br",
-      "Referer" = "https://www.nba.com/",
-      "Origin" = "https://www.nba.com",
-      "Sec-Fetch-Dest" = "empty",
-      "Sec-Fetch-Mode" = "cors",
-      "Sec-Fetch-Site" = "same-site",
-      "Connection" = "keep-alive"
-    )
-    
-    # Helper: fetch a CDN JSON URL, return parsed list or NULL
-    fetch_nba <- function(url) {
-      resp <- tryCatch(
-        RETRY("GET", url = url, times = 3,
-              add_headers(.headers = nba_headers),
-              timeout(15),
-              terminate_on = c(404)),  # don't retry on real 404s
-        error = function(e) NULL
-      )
-      if (is.null(resp) || status_code(resp) != 200) return(NULL)
-      tryCatch(fromJSON(rawToChar(resp$content), simplifyVector = FALSE),
-               error = function(e) NULL)
-    }
-    
     for (i in 1:nrow(rg.df)) {
       gid <- rg.df$GAME_ID[i]
       gid_chr <- as.character(gid)
-      
+
       # Play-by-play
-      pbp <- fetch_nba(paste0("https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_", gid, ".json"))
+      pbp <- cdn_try(pbp_url(gid))
       if (po == 0) {
         pbprg.lst[[gid_chr]] <- pbp
       } else {
@@ -345,7 +379,7 @@ wrap_function<- function() {
       }
       
       # Boxscore
-      box <- fetch_nba(paste0("https://cdn.nba.com/static/json/liveData/boxscore/boxscore_", gid, ".json"))
+      box <- cdn_try(box_url(gid))
       if (is.null(box)) next
       if (po == 0) {
         boxrg.lst[[gid_chr]] <- box
@@ -651,10 +685,6 @@ wrap_function<- function() {
     
     return(result)
   }
-  
-  # Safe NULL handling
-  `%||%` <- function(x, y) if (is.null(x)) y else x
-  
   # Simplified version of the ltd function assumed to be used in the original pf function
   # This is used to process each row in the NBA Live API structure
   ltd <- function(row) {
@@ -3285,8 +3315,7 @@ wrap_function<- function() {
   later-now
   
   if (!replace) {
-    drv <- dbDriver("MySQL")
-    con <- dbConnect(drv, username="root", password="", dbname="nba", host="localhost", port=3306)
+    con <- db_local()
     
     imygm<-dbGetQuery(con,"SELECT DISTINCT gid FROM gms")
     imywpg<-dbGetQuery(con,"SELECT DISTINCT gid FROM wpg")
@@ -3370,8 +3399,7 @@ wrap_function<- function() {
     gi<-paste("('",gi,"')",sep="")
     # delete existing rows
     # set connections #
-    drv <- dbDriver("MySQL")
-    con <- dbConnect(drv, username="root", password="", dbname="nba", host="localhost", port=3306)
+    con <- db_local()
     
     dbGetQuery(con,paste("DELETE FROM gms WHERE gid IN ",gi,sep=""))
     dbGetQuery(con,paste("DELETE FROM wpg WHERE gid IN ",gi,sep=""))
@@ -3399,8 +3427,7 @@ wrap_function<- function() {
   
   # output to mysql #
   # set connections #
-  drv <- dbDriver("MySQL")
-  con <- dbConnect(drv, username="root", password="", dbname="nba", host="localhost", port=3306)
+  con <- db_local()
   
   dbWriteTable(con,"gms",mygm,row.names=F,append=T)
   dbWriteTable(con,"wpg",mywpg,row.names=F,append=T)
@@ -3421,18 +3448,14 @@ wrap_function<- function() {
   #dbWriteTable(con,"off",myoff,row.names=F,append=T) # comment out for now until I can find new endpoint
   
   dbDisconnect(con)
-  
-  ip_new<-""
-  pw_new<-""
-  
+
   if (replace) {
     # create list of game ids
     gi<-names(pbp.lst)
     gi<-paste(gi,collapse="','")
     gi<-paste("('",gi,"')",sep="")
     # delete existing rows
-    drv <- dbDriver("MySQL")
-    con <- dbConnect(drv, username="boooeee_rupdate", password=pw_new, dbname="boooeee_nba", host=ip_new, port=3306)
+    con <- db_remote_new()
     
     dbGetQuery(con,paste("DELETE FROM gms WHERE gid IN ",gi,sep=""))
     dbGetQuery(con,paste("DELETE FROM wpg WHERE gid IN ",gi,sep=""))
@@ -3444,8 +3467,7 @@ wrap_function<- function() {
     dbDisconnect(con)
   }
   
-  drv <- dbDriver("MySQL")
-  con <- dbConnect(drv, username="boooeee_rupdate", password=pw_new, dbname="boooeee_nba", host=ip_new, port=3306)
+  con <- db_remote_new()
   
   dbWriteTable(con,"gms",mygm,row.names=F,append=T)
   dbWriteTable(con,"wpg",mywpg,row.names=F,append=T)
@@ -3457,49 +3479,10 @@ wrap_function<- function() {
   dbDisconnect(con)
   
   # pull in complete play by play #
+  # reuse the play by play pulled above rather than downloading every game twice #
   jslst<-vector('list')
-  
-  library(httr)
-  
-  nba_headers <- c(
-    "User-Agent" = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Accept" = "*/*",
-    "Accept-Language" = "en-US,en;q=0.9",
-    "Accept-Encoding" = "gzip, deflate, br",
-    "Referer" = "https://www.nba.com/",
-    "Origin" = "https://www.nba.com",
-    "Sec-Fetch-Dest" = "empty",
-    "Sec-Fetch-Mode" = "cors",
-    "Sec-Fetch-Site" = "same-site",
-    "Connection" = "keep-alive"
-  )
-  
   for (gid in mygm$gid[1:nrow(mygm)]) {
-    
-    print(paste(gid, Sys.time()))
-    flush.console()
-    
-    url <- paste0("https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_", gid, ".json")
-    
-    resp <- tryCatch(
-      RETRY("GET", url = url, times = 3,
-            add_headers(.headers = nba_headers),
-            timeout(15),
-            terminate_on = c(404)),
-      error = function(e) NULL
-    )
-    
-    sb <- NULL
-    if (!is.null(resp) && status_code(resp) == 200) {
-      sb <- tryCatch(
-        RJSONIO::fromJSON(rawToChar(resp$content)),
-        error = function(e) NULL
-      )
-    }
-    
-    jslst[[gid]] <- sb
-    
-    Sys.sleep(0.3)
+    jslst[[gid]] <- pbprg.lst[[gid]] %||% cdn_try(pbp_url(gid))
   }
   
   yl<-vector('list')
@@ -3554,8 +3537,7 @@ wrap_function<- function() {
   
   # output to mysql #
   # set connections #
-  drv <- dbDriver("MySQL")
-  con <- dbConnect(drv, username="root", password="", dbname="nba", host="localhost", port=3306)
+  con <- db_local()
   
   dbGetQuery(con,paste("DELETE FROM pbpr2 WHERE gid IN (",gids,")",sep=""))
   dbWriteTable(con,"pbpr2",xd2,row.names=F,append=T)
@@ -3563,6 +3545,7 @@ wrap_function<- function() {
   dbDisconnect(con)
 }
 
-tryCatch(wrap_function(),error=function(e) NULL)
+# print the error instead of exiting silently, so a 403 or a bad login shows up in the task log #
+tryCatch(wrap_function(),error=function(e) message("wpNBA failed: ",conditionMessage(e)))
 
 quit(save="no")
