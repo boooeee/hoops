@@ -106,25 +106,31 @@ mkd<-mkd %>%
 
 # fix team names #
 mkd <- mkd %>%
-  mutate(tm=ifelse(tm=="WSH","WAS",tm),to.tm=ifelse(tm=="WSH","WAS",to.tm))
+  mutate(tm=ifelse(tm=="WSH","WAS",tm),to.tm=ifelse(to.tm=="WSH","WAS",to.tm))
 
 
 library(httr)
 library(jsonlite)
 
 fetch_nba_schedule <- function() {
-  resp <- RETRY(
-    "GET", "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json",
-    add_headers(
-      Accept            = "application/json, text/plain, */*",
-      `Accept-Language` = "en-US,en;q=0.9",
-      Referer           = "https://www.nba.com/"
-    ),
-    user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"),
-    times = 10, pause_base = 1, pause_cap = 30
+  # cdn.nba.com answers 403 with or without browser headers. It sits in front
+  # of the NBA's own S3 bucket, which serves the same file, so read from the
+  # bucket first and keep cdn.nba.com as the backup.
+  urls <- c(
+    "https://nba-prod-us-east-1-mediaops-stats.s3.amazonaws.com/NBA/staticData/scheduleLeagueV2.json",
+    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json"
   )
-  stop_for_status(resp)
-  
+  resp <- NULL
+  for (u in urls) {
+    resp <- tryCatch(
+      RETRY("GET", u, times = 3, pause_base = 1, pause_cap = 30, terminate_on = c(403, 404)),
+      error = function(e) NULL)
+    if (!is.null(resp) && status_code(resp) == 200) break
+    message("Schedule failed from ", u, if (!is.null(resp)) paste0(": HTTP ", status_code(resp)))
+    resp <- NULL
+  }
+  if (is.null(resp)) stop("couldn't download the NBA schedule - see the failures above")
+
   sb <- fromJSON(content(resp, as = "text", encoding = "UTF-8"), simplifyVector = FALSE)
   
   # Flatten to a single list of games; each game with homeTeam/awayTeam as 1-row data frames
