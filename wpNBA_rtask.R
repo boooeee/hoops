@@ -14,30 +14,40 @@ library(purrr)
 `%||%` <- function(x, y) if (is.null(x)) y else x
 
 # ── HTTP helpers ──────────────────────────────────────────────────────────────
-# Same approach as the WNBA script. cdn.nba.com answers the spoofed Chrome
-# headers with 403s, so CDN requests go out plain, with httr2's own user agent.
-# The browser headers are only sent to stats.nba.com, which wants them.
+# cdn.nba.com is Akamai in front of the NBA's own S3 bucket, which serves the
+# same schedule, play-by-play and box score files. Akamai answers 403 with or
+# without browser headers, so each file is read from the bucket first, with
+# cdn.nba.com as the backup. The browser headers are only sent to
+# stats.nba.com, which wants them.
 # Responses are still parsed with RJSONIO, so every list downstream keeps the
 # shape the parsing code was written against.
-cdn_get <- function(url) {
-  request(url) |>
+nba_sources <- c(
+  "S3"  = "https://nba-prod-us-east-1-mediaops-stats.s3.amazonaws.com/NBA/",
+  "CDN" = "https://cdn.nba.com/static/json/")
+
+get_json <- function(url) {
+  resp <- request(url) |>
     req_timeout(60) |>
     req_retry(max_tries = 3, backoff = \(i) 5 * i) |>
-    req_perform() |>
-    resp_body_string() |>
-    RJSONIO::fromJSON()
+    req_perform()
+  RJSONIO::fromJSON(resp_body_string(resp))
 }
 
-# NULL instead of an error, so one missing game doesn't stop the run
-cdn_try <- function(url) {
-  tryCatch(cdn_get(url), error = function(e) {
-    message("CDN failed (", basename(url), "): ", conditionMessage(e))
-    NULL
-  })
+# path is relative to static/json/, e.g. "liveData/boxscore/boxscore_<gid>.json".
+# NULL instead of an error, so one missing game doesn't stop the run.
+nba_file <- function(path) {
+  for (src in names(nba_sources)) {
+    out <- tryCatch(get_json(paste0(nba_sources[[src]], path)), error = function(e) {
+      message(src, " failed (", basename(path), "): ", conditionMessage(e))
+      NULL
+    })
+    if (!is.null(out)) return(out)
+  }
+  NULL
 }
 
 nba_get <- function(url, query = list()) {
-  request(url) |>
+  resp <- request(url) |>
     req_headers(
       "User-Agent"         = paste0("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) ",
                                     "AppleWebKit/537.36 (KHTML, like Gecko) ",
@@ -60,30 +70,24 @@ nba_get <- function(url, query = list()) {
     req_url_query(!!!query) |>
     req_timeout(60) |>
     req_retry(max_tries = 4, backoff = \(i) 10 * i) |>
-    req_perform() |>
-    resp_body_string() |>
-    RJSONIO::fromJSON()
+    req_perform()
+  RJSONIO::fromJSON(resp_body_string(resp))
 }
 
-pbp_url <- function(gid) paste0("https://cdn.nba.com/static/json/liveData/playbyplay/playbyplay_", gid, ".json")
-box_url <- function(gid) paste0("https://cdn.nba.com/static/json/liveData/boxscore/boxscore_", gid, ".json")
+pbp_path <- function(gid) paste0("liveData/playbyplay/playbyplay_", gid, ".json")
+box_path <- function(gid) paste0("liveData/boxscore/boxscore_", gid, ".json")
 
-# Try each CDN copy of the league schedule, then stats.nba.com as a last
-# resort (same leagueSchedule layout, but often blocked).
+# Try each copy of the league schedule, then stats.nba.com as a last resort
+# (same leagueSchedule layout, but slower and sometimes blocked).
 fetch_schedule <- function(ssnf) {
-  cdn_urls <- c(
-    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2.json",
-    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_2.json",
-    "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
-  )
-  for (u in cdn_urls) {
-    sched <- cdn_try(u)
+  for (f in c("scheduleLeagueV2.json", "scheduleLeagueV2_2.json", "scheduleLeagueV2_1.json")) {
+    sched <- nba_file(paste0("staticData/", f))
     if (!is.null(sched)) {
-      message("Schedule from ", basename(u))
+      message("Schedule from ", f)
       return(sched)
     }
   }
-  message("All CDN schedule files failed; trying stats.nba.com (may time out)...")
+  message("All schedule files failed; trying stats.nba.com (may time out)...")
   nba_get("https://stats.nba.com/stats/scheduleleaguev2",
           list(Season = ssnf, LeagueID = "00"))
 }
@@ -371,7 +375,7 @@ wrap_function<- function() {
       gid_chr <- as.character(gid)
 
       # Play-by-play
-      pbp <- cdn_try(pbp_url(gid))
+      pbp <- nba_file(pbp_path(gid))
       if (po == 0) {
         pbprg.lst[[gid_chr]] <- pbp
       } else {
@@ -379,7 +383,7 @@ wrap_function<- function() {
       }
       
       # Boxscore
-      box <- cdn_try(box_url(gid))
+      box <- nba_file(box_path(gid))
       if (is.null(box)) next
       if (po == 0) {
         boxrg.lst[[gid_chr]] <- box
@@ -401,6 +405,9 @@ wrap_function<- function() {
       flush.console()
       
       Sys.sleep(0.3)  # be polite, avoid rate-limit pattern detection
+    }
+    if (length(if (po==0) boxrg.lst else boxpo.lst)==0) {
+      stop("no box scores downloaded - see the failures above")
     }
     if (po==0) {
       #save(boxsmrg.lst,file=paste(loc,"boxsmrg",ssn,".RData",sep=""),compress=TRUE)
@@ -3482,7 +3489,7 @@ wrap_function<- function() {
   # reuse the play by play pulled above rather than downloading every game twice #
   jslst<-vector('list')
   for (gid in mygm$gid[1:nrow(mygm)]) {
-    jslst[[gid]] <- pbprg.lst[[gid]] %||% cdn_try(pbp_url(gid))
+    jslst[[gid]] <- pbprg.lst[[gid]] %||% nba_file(pbp_path(gid))
   }
   
   yl<-vector('list')
