@@ -751,6 +751,18 @@ wrap_function<- function() {
     if (length(actions) == 0) {
       return(NULL)
     }
+
+    # Scorer corrections can leave a play out of time order in the file (e.g. a
+    # 10:15 miss listed after an 8:47 rebound), which makes game time run
+    # backwards and breaks findInterval() in the win probability loop. Put the
+    # plays in quarter and clock order, keeping the file's order within a tie.
+    act_q <- sapply(actions, function(a) if (is.list(a)) as.numeric(a$period %||% NA) else NA)
+    act_clk <- sapply(actions, function(a) {
+      cl <- if (is.list(a)) a$clock %||% "" else ""
+      suppressWarnings(as.numeric(sub("^PT([0-9]+)M.*$", "\\1", cl)) * 60 +
+                       as.numeric(sub("^PT[0-9]+M([0-9.]+)S$", "\\1", cl)))
+    })
+    actions <- actions[order(act_q, -act_clk, seq_along(actions))]
     
     # Print the game ID for debugging
     if (!is.null(game_id)) {
