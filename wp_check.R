@@ -5,7 +5,7 @@
 # and wp_check() finds every game where a team was in it, then compares how often
 # those teams went on to win with what the model (wpg.wp) said at the time.
 #
-#   res <- wp_check(margin = c(-27, -23), time = c("Q2 10:00", "Q2 7:00"))
+#   res <- wp_check(margin = c(-27, -23), time = c("Q2 11:00", "Q2 8:00"))
 #   res                    # summary table + the upsets
 #   res$summary            # one row per season group (+ "All" when split)
 #   res$games              # one row per team-game in the sample
@@ -13,10 +13,10 @@
 #
 # margin   the team's score minus the opponent's, both ends included. c(-27, -23) is
 #          "down 23 to 27"; positive is leading. One number = exactly that margin.
-# time     two game-clock points, either order, both ends included: "Q2 10:00",
+# time     two game-clock points, either order, both ends included: "Q2 11:00",
 #          "Q4 1:30", "OT1 2:00" ("OT" alone is OT1) - or minutes left in regulation,
-#          c(30, 27). Before 2006 the WNBA played 20-minute halves, which wpg numbers
-#          like quarters, so "Q2 7:00" is 13 minutes into the game in every season.
+#          c(36, 33). (WNBA before 2006: wpg numbers the 20-minute halves like quarters,
+#          so the same clock points work in every season.)
 #          A window inside overtime uses only overtime plays (the regulation buzzer is
 #          the same moment as "OT1 5:00"), and a window inside regulation only regulation.
 # seasons  NULL for every season, or e.g. 2015:2025
@@ -24,8 +24,9 @@
 #            NULL                   one pooled result
 #            "season"               every season
 #            5                      blocks of 5 seasons
-#            c(1997, 2006, 2016)    eras starting in those seasons
-# games    "all", "regular" or "playoffs"
+#            c(2000, 2010, 2020)    eras starting in those seasons
+# games    "all", "regular" (po = 0) or "playoffs" (po = 1). The NBA Cup final (po = 2)
+#          is only in "all"
 # side     "any", "home" or "away"
 #
 # Each game counts once per team: at the first play inside the time window where the
@@ -52,30 +53,31 @@ library(tidyverse)
 # =====================================================================
 # SETTINGS - check these first
 # =====================================================================
-db_name      <- "wnba"            # MySQL database holding gms and wpg
-qtr_secs     <- 600               # quarter length in seconds: 600 for the WNBA, 720 for the NBA
-ot_secs      <- 300               # overtime length in seconds
-gid_prefixes <- c("102", "104")   # first 3 characters of gid to keep: regular season and playoffs
-                                  # (leaves out preseason, All-Star, Commissioner's Cup final).
-                                  # NULL keeps every game in gms.
+db_name      <- "nba"             # MySQL database holding gms and wpg ("wnba" for the WNBA)
+qtr_secs     <- 720               # quarter length in seconds: 720 for the NBA, 600 for the WNBA
+ot_secs      <- 300               # overtime length in seconds (5 minutes in both leagues)
+gid_prefixes <- NULL              # first 3 characters of gid to keep; NULL keeps every game in gms.
+                                  # The NBA database already leaves out All-Star games. For the
+                                  # WNBA use c("102", "104"): regular season and playoffs only.
 play_order   <- "r"               # wpg column numbering the plays within a game. The win-probability
                                   # scripts write r after putting plays in clock order. NULL if wpg
                                   # has none: plays on the same game clock (free throws) are then
                                   # taken in the order the database returns them.
-out_dir      <- "~/Dropbox/wnba/" # where plot_wp_check() writes its PNG
+out_dir      <- "~/Dropbox/Nba/"  # where plot_wp_check() writes its PNG
 
-# MySQL login from ~/.Renviron, same as the other scripts:
-#   WNBA_DB_USER=root   (optional, defaults to root)
-#   WNBA_DB_PASS=...
-#   WNBA_DB_HOST=...    (optional, defaults to localhost)
+# MySQL login from ~/.Renviron, like wpNBA_rtask.R: the NBA_ variables, or the WNBA_
+# ones when those aren't set
+#   NBA_DB_USER=root   (optional, defaults to root)
+#   NBA_DB_PASS=...
+#   NBA_DB_HOST=...    (optional, defaults to localhost)
 if (file.exists("~/.Renviron")) readRenviron("~/.Renviron")
-if (!nzchar(Sys.getenv("WNBA_DB_PASS")))
-  message("WNBA_DB_PASS is not set in ~/.Renviron - connecting to MySQL with an empty password")
+db_env <- function(var, default = "") Sys.getenv(paste0("NBA_", var), Sys.getenv(paste0("WNBA_", var), default))
+if (!nzchar(db_env("DB_PASS")))
+  message("NBA_DB_PASS is not set in ~/.Renviron - connecting to MySQL with an empty password")
 
 sqlf <- function(x) {
-  con <- dbConnect(MySQL(), username = Sys.getenv("WNBA_DB_USER", "root"),
-                   password = Sys.getenv("WNBA_DB_PASS"), dbname = db_name,
-                   host = Sys.getenv("WNBA_DB_HOST", "localhost"), port = 3306)
+  con <- dbConnect(MySQL(), username = db_env("DB_USER", "root"), password = db_env("DB_PASS"),
+                   dbname = db_name, host = db_env("DB_HOST", "localhost"), port = 3306)
   on.exit(dbDisconnect(con))
   withCallingHandlers(dbGetQuery(con, x), warning = function(w)      # UNSIGNED / DECIMAL columns
     if (grepl("imported as numeric", conditionMessage(w))) invokeRestart("muffleWarning"))
@@ -121,7 +123,7 @@ situation_sql <- function(margin, secs, seasons, games, side) {
   if (!is.null(seasons))      inner <- c(inner, sprintf("g.ssn IN (%s)", paste(as.integer(seasons), collapse = ", ")))
   if (!is.null(gid_prefixes)) inner <- c(inner, sprintf("LEFT(g.gid, 3) IN (%s)", paste0("'", gid_prefixes, "'", collapse = ", ")))
   if (games == "playoffs")    inner <- c(inner, "g.po = 1")
-  if (games == "regular")     inner <- c(inner, "(g.po IS NULL OR g.po <> 1)")
+  if (games == "regular")     inner <- c(inner, "(g.po IS NULL OR g.po = 0)")
   home_ok <- sprintf("x.home_margin BETWEEN %s AND %s", num(margin[1]), num(margin[2]))
   away_ok <- sprintf("x.home_margin BETWEEN %s AND %s", num(-margin[2]), num(-margin[1]))
   outer <- c(sprintf("x.t_left BETWEEN %s AND %s", num(secs[1]), num(secs[2])),
@@ -325,16 +327,16 @@ plot_wp_check <- function(res, file = NULL) {
 # =====================================================================
 # Examples - edit these, or call wp_check() from the console
 # =====================================================================
-# Down about 25 early in the 2nd quarter (first 3 minutes of it)
-res <- wp_check(margin = c(-27, -23), time = c("Q2 10:00", "Q2 7:00"))
+# Down about 25 early in the 2nd quarter
+res <- wp_check(margin = c(-27, -23), time = c("Q2 11:00", "Q2 8:00"))
 print(res)
 
 # Same spot, split into 5-season blocks, regular season only
-res_blocks <- wp_check(margin = c(-27, -23), time = c("Q2 10:00", "Q2 7:00"), by = 5, games = "regular")
+res_blocks <- wp_check(margin = c(-27, -23), time = c("Q2 11:00", "Q2 8:00"), by = 5, games = "regular")
 print(res_blocks)
 plot_wp_check(res_blocks, "wp_check_down25_q2.png")
 
 # More: one row per season since 2015; down 10-15 with 3-6 minutes left; the playoffs only
-# print(wp_check(margin = c(-27, -23), time = c("Q2 10:00", "Q2 7:00"), seasons = 2015:2025, by = "season"))
+# print(wp_check(margin = c(-27, -23), time = c("Q2 11:00", "Q2 8:00"), seasons = 2015:2025, by = "season"))
 # print(wp_check(margin = c(-15, -10), time = c("Q4 6:00", "Q4 3:00")))
-# print(wp_check(margin = c(-15, -10), time = c(6, 3), games = "playoffs", by = c(1997, 2006, 2016)))
+# print(wp_check(margin = c(-15, -10), time = c(6, 3), games = "playoffs", by = c(2000, 2010, 2020)))

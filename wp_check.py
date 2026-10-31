@@ -11,23 +11,23 @@ those teams went on to win with what the model (wpg.wp) said at the time.
 
 In Python (IPython, Jupyter, VS Code, Positron):
     from wp_check import wp_check, plot_wp_check
-    res = wp_check(margin=(-27, -23), time=("Q2 10:00", "Q2 7:00"))
+    res = wp_check(margin=(-27, -23), time=("Q2 11:00", "Q2 8:00"))
     res                   # summary table + the upsets
     res.summary           # pandas DataFrame, one row per season group
     res.games             # one row per team-game in the sample
     plot_wp_check(res, "wp_check.png")
 
 From a terminal:
-    python wp_check.py --margin -27 -23 --time "Q2 10:00" "Q2 7:00"
-    python wp_check.py --margin -27 -23 --time "Q2 10:00" "Q2 7:00" --by 5 --games regular --plot q2.png
+    python wp_check.py --margin -27 -23 --time "Q2 11:00" "Q2 8:00"
+    python wp_check.py --margin -27 -23 --time "Q2 11:00" "Q2 8:00" --by 5 --games regular --plot q2.png
     python wp_check.py --margin -15 -10 --time 6 3 --seasons 2015 2025 --by season
 
 Arguments (see wp_check.R for the long version):
     margin   team's score minus the opponent's, both ends included; (-27, -23) = down 23 to 27
-    time     two clock points, "Q2 10:00" / "OT1 2:00", or minutes left in regulation
+    time     two clock points, "Q2 11:00" / "OT1 2:00", or minutes left in regulation
     seasons  None, or a list/range of seasons, e.g. range(2015, 2026)
-    by       None, "season", a block length like 5, or era starts like [1997, 2006, 2016]
-    games    "all", "regular" or "playoffs"
+    by       None, "season", a block length like 5, or era starts like [2000, 2010, 2020]
+    games    "all", "regular" (po = 0) or "playoffs" (po = 1); the NBA Cup final (po = 2) is only in "all"
     side     "any", "home" or "away"
 
 Each game counts once per team: at the first play inside the time window where the
@@ -52,15 +52,16 @@ import pymysql
 # SETTINGS - check these first. (Python convention: module-level constants
 # are written in CAPITALS. Nothing enforces it - it's a signal to the reader.)
 # =====================================================================
-DB_NAME = "wnba"                # MySQL database holding gms and wpg
-QTR_SECS = 600                  # quarter length in seconds: 600 for the WNBA, 720 for the NBA
-OT_SECS = 300                   # overtime length in seconds
-GID_PREFIXES = ["102", "104"]   # first 3 characters of gid to keep: regular season and playoffs.
-                                # None keeps every game in gms.
+DB_NAME = "nba"                 # MySQL database holding gms and wpg ("wnba" for the WNBA)
+QTR_SECS = 720                  # quarter length in seconds: 720 for the NBA, 600 for the WNBA
+OT_SECS = 300                   # overtime length in seconds (5 minutes in both leagues)
+GID_PREFIXES = None             # first 3 characters of gid to keep; None keeps every game in gms.
+                                # The NBA database already leaves out All-Star games. For the
+                                # WNBA use ["102", "104"]: regular season and playoffs only.
 PLAY_ORDER = "r"                # wpg column numbering the plays in each game (the win-probability
                                 # scripts write r after putting plays in clock order). None if wpg
                                 # has none: ties on the game clock then keep database order.
-OUT_DIR = "~/Dropbox/wnba/"     # where plot_wp_check() writes its PNG
+OUT_DIR = "~/Dropbox/Nba/"      # where plot_wp_check() writes its PNG
 
 # house style, as in wp_check.R
 INK, INK_SOFT, RULE, PAPER = "#22211e", "#6f6b64", "#d9d6d0", "#ffffff"
@@ -68,8 +69,9 @@ ACCENT, MODEL_COL = "#3b6ea5", "#d0703a"   # actual, model
 
 
 # =====================================================================
-# Database. The login comes from ~/.Renviron, the same file R reads:
-#   WNBA_DB_USER, WNBA_DB_PASS, WNBA_DB_HOST (optional)
+# Database. The login comes from ~/.Renviron, the same file R reads, like
+# wpNBA_rtask.R: NBA_DB_USER, NBA_DB_PASS, NBA_DB_HOST (optional), or the
+# WNBA_ versions when those aren't set.
 # =====================================================================
 def read_renviron(path="~/.Renviron"):
     """Copy KEY=value lines from ~/.Renviron into the environment, like R's readRenviron()."""
@@ -83,12 +85,16 @@ def read_renviron(path="~/.Renviron"):
             os.environ[key.strip()] = value.strip().strip("'\"")
 
 
+def db_env(var, default=""):
+    """NBA_<var>, else WNBA_<var>, else the default."""
+    return os.environ.get(f"NBA_{var}", os.environ.get(f"WNBA_{var}", default))
+
+
 def sqlf(sql):
     """Run a query and return a DataFrame - the R script's sqlf()."""
     read_renviron()
-    con = pymysql.connect(host=os.environ.get("WNBA_DB_HOST", "localhost"), port=3306,
-                          user=os.environ.get("WNBA_DB_USER", "root"),
-                          password=os.environ.get("WNBA_DB_PASS", ""), database=DB_NAME)
+    con = pymysql.connect(host=db_env("DB_HOST", "localhost"), port=3306, user=db_env("DB_USER", "root"),
+                          password=db_env("DB_PASS"), database=DB_NAME)
     try:
         with con.cursor() as cur:   # "with" closes the cursor when the block ends, error or not
             cur.execute(sql)
@@ -105,7 +111,7 @@ CLOCK_RE = re.compile(r"^(?:Q([1-4])|OT([0-9]*)) ?([0-9]+)(?::([0-9]+(?:\.[0-9]+
 
 
 def clock_secs(x):
-    """'Q2 10:00' -> 1800 (WNBA). A number is minutes left in regulation."""
+    """'Q2 11:00' -> 2100 (NBA quarters). A number is minutes left in regulation."""
     if isinstance(x, Real):                            # any number: int, float, numpy
         return x * 60
     m = CLOCK_RE.match(" ".join(x.upper().split()))
@@ -154,7 +160,7 @@ def situation_sql(margin, secs, seasons, games, side):
     if games == "playoffs":
         inner.append("g.po = 1")
     if games == "regular":
-        inner.append("(g.po IS NULL OR g.po <> 1)")
+        inner.append("(g.po IS NULL OR g.po = 0)")
     home_ok = f"x.home_margin BETWEEN {num(margin[0])} AND {num(margin[1])}"
     away_ok = f"x.home_margin BETWEEN {num(-margin[1])} AND {num(-margin[0])}"
     side_ok = {"any": f"({home_ok} OR {away_ok})", "home": home_ok, "away": away_ok}[side]
@@ -407,7 +413,7 @@ def main():
     ap.add_argument("--time", nargs=2, required=True,
                     help='two clock points, e.g. "Q2 10:00" "Q2 7:00", or minutes left in regulation')
     ap.add_argument("--seasons", nargs=2, type=int, metavar=("FIRST", "LAST"), help="e.g. 2015 2025")
-    ap.add_argument("--by", nargs="+", help='"season", a block length like 5, or era starts like 1997 2006 2016')
+    ap.add_argument("--by", nargs="+", help='"season", a block length like 5, or era starts like 2000 2010 2020')
     ap.add_argument("--games", choices=["all", "regular", "playoffs"], default="all")
     ap.add_argument("--side", choices=["any", "home", "away"], default="any")
     ap.add_argument("--plot", metavar="FILE.png", help="also save the chart to OUT_DIR")
