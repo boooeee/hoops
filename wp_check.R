@@ -58,9 +58,10 @@ ot_secs      <- 300               # overtime length in seconds
 gid_prefixes <- c("102", "104")   # first 3 characters of gid to keep: regular season and playoffs
                                   # (leaves out preseason, All-Star, Commissioner's Cup final).
                                   # NULL keeps every game in gms.
-play_order   <- NULL              # a wpg column that numbers the plays within a game, if it has
-                                  # one. Without it, plays on the same game clock (free throws)
-                                  # are taken in the order the database returns them.
+play_order   <- "r"               # wpg column numbering the plays within a game. The win-probability
+                                  # scripts write r after putting plays in clock order. NULL if wpg
+                                  # has none: plays on the same game clock (free throws) are then
+                                  # taken in the order the database returns them.
 out_dir      <- "~/Dropbox/wnba/" # where plot_wp_check() writes its PNG
 
 # MySQL login from ~/.Renviron, same as the other scripts:
@@ -192,7 +193,11 @@ wp_check <- function(margin, time, seasons = NULL, by = NULL,
   rng_t <- sort(clock_secs(time))
   if (length(margin) > 2 || length(rng_t) != 2) stop("margin takes one or two values, time takes two")
 
-  rows <- sqlf(situation_sql(rng_m, rng_t, seasons, games, want))
+  rows <- tryCatch(sqlf(situation_sql(rng_m, rng_t, seasons, games, want)), error = function(e) {
+    if (!is.null(play_order) && grepl("Unknown column", conditionMessage(e)))
+      stop("wpg has no column `", play_order, "` - set play_order <- NULL at the top of wp_check.R", call. = FALSE)
+    stop(e)
+  })
   if (nrow(rows) == 0) stop("No game was ever in that situation - widen margin or time")
   rows <- rows |>
     mutate(across(c(ssn, po, hscr, ascr, q, min, sec, h, a, wp, t_left, home_margin), as.numeric),

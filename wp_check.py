@@ -57,7 +57,9 @@ QTR_SECS = 600                  # quarter length in seconds: 600 for the WNBA, 7
 OT_SECS = 300                   # overtime length in seconds
 GID_PREFIXES = ["102", "104"]   # first 3 characters of gid to keep: regular season and playoffs.
                                 # None keeps every game in gms.
-PLAY_ORDER = None               # a wpg column numbering the plays in each game, if it has one
+PLAY_ORDER = "r"                # wpg column numbering the plays in each game (the win-probability
+                                # scripts write r after putting plays in clock order). None if wpg
+                                # has none: ties on the game clock then keep database order.
 OUT_DIR = "~/Dropbox/wnba/"     # where plot_wp_check() writes its PNG
 
 # house style, as in wp_check.R
@@ -289,7 +291,12 @@ def wp_check(margin, time, seasons=None, by=None, games="all", side="any"):
     lo_m, hi_m = sorted(margins)
     lo_t, hi_t = sorted(times)
 
-    rows = sqlf(situation_sql((lo_m, hi_m), (lo_t, hi_t), seasons, games, side))
+    try:
+        rows = sqlf(situation_sql((lo_m, hi_m), (lo_t, hi_t), seasons, games, side))
+    except pymysql.MySQLError as e:                    # R: tryCatch(..., error = function(e) ...)
+        if PLAY_ORDER and "Unknown column" in str(e):
+            raise ValueError(f"wpg has no column `{PLAY_ORDER}` - set PLAY_ORDER = None at the top of wp_check.py") from e
+        raise
     if rows.empty:
         raise ValueError("No game was ever in that situation - widen margin or time")
     numeric = ["po", "hscr", "ascr", "q", "min", "sec", "h", "a", "wp", "t_left", "home_margin"]
