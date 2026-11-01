@@ -279,8 +279,20 @@ df <- bxa %>%
   group_by(ssn) %>%
   summarise(dfWPA=sum(dfWPA))
 
+# A team's score before a play: the highest score it had in that game below its score after
+# the play. Scores only go up, so this doesn't depend on the order wpg's rows come back in.
+# The shot's value comes from this rather than pt1, which has some made 3s coded MK2 (2026
+# Finals G7, Gabby Williams, 57-57 -> 60-57 was labelled 58-57 -> 60-57).
+score_before <- function(x) {
+  s <- sort(unique(c(0, x)))
+  s[pmax(findInterval(x, s, left.open = TRUE), 1)]
+}
+
 shots <- wp %>%
   filter(substr(gid,1,3)==po_prefix) %>%
+  group_by(gid) %>%
+  mutate(h_pre=score_before(h), a_pre=score_before(a)) %>%
+  ungroup() %>%
   filter(pt1 %in% c("MK2","MK3")) %>%
   left_join(select(po_situation,dt,htm,atm,top_seed,round_lab,rounds_after,best_of,top_seed_sitch,bottom_seed_sitch,gid,series_prob_win,series_prob_loss),join_by(gid)) %>%
   left_join(select(player,pid,ssn,fnm=fn,lnm=ln),join_by(pid1==pid,ssn)) %>%
@@ -307,14 +319,20 @@ shots <- wp %>%
          opp_wins=ifelse(shooter_top,bottom_seed_sitch,top_seed_sitch),
          shooter_pts=ifelse(di=="h",h,a),
          opp_pts=ifelse(di=="h",a,h),
-         shot_pts=ifelse(pt1=="MK3",3,2)) %>%
-  select(ssn, dt, gid, htm, atm, q, min, sec, wp, wpa, m, ma, h, a, d, pid1, fnm, lnm,
+         shot_pts_coded=ifelse(pt1=="MK3",3,2),
+         shot_pts=shooter_pts-ifelse(di=="h",h_pre,a_pre),
+         # a jump that isn't 2 or 3 is a score glitch, not a shot value - fall back to pt1
+         shot_pts=ifelse(shot_pts %in% 2:3,shot_pts,shot_pts_coded)) %>%
+  select(ssn, dt, gid, htm, atm, q, min, sec, wp, wpa, m, ma, h, a, d, pid1, pt1, fnm, lnm,
          round_lab, rounds_after, best_of, top_seed, top_seed_sitch, bottom_seed_sitch,
-         shooter_wins, opp_wins, shooter_pts, opp_pts, shot_pts,
+         shooter_wins, opp_wins, shooter_pts, opp_pts, shot_pts, shot_pts_coded,
          starts_with("series_prob"), starts_with("champ_prob"), win_prob_pre, win_prob_post)
 
 # sanity check: every made shot should help the shooter's title odds
 summary(shots$champ_prob_change)
+
+# made shots whose pt1 code disagrees with the score change (the labels use the score change)
+shots %>% filter(shot_pts!=shot_pts_coded) %>% count(ssn, pt1, shot_pts) %>% print(n=Inf)
 
 # rank separately, so the KL chart is the top n by KL, not the top n by change re-sorted
 bigshots    <- shots %>% arrange(desc(champ_prob_change)) %>% slice_head(n=n_shots)
