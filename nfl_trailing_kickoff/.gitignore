@@ -1,3 +1,4 @@
-# Cached play-by-play pulls are large and easy to rebuild with 01_pull_pbp.py
-data/pbp_*.parquet
-__pycache__/
+# Cached play-by-play pull is large and easy to rebuild with 01_pull_pbp.R
+data/
+.Rhistory
+.RData

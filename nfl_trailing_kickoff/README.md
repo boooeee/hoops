@@ -5,18 +5,25 @@ How often does a team come back when it trails by 6, 7, 8 or 9 points in the
 nflverse play-by-play (the same files `nflfastR` / `nflreadr` use), every
 season from 1999 through the current one.
 
-This is written in Python, with notes along the way that map it to R/dplyr.
-`output/situations.csv` reads straight into R with `readr::read_csv()` if you
-want to do the smoothing there instead.
-
 ## Run it
 
-```bash
-pip install -r requirements.txt
-python3 01_pull_pbp.py          # ~1 min; caches Q3-OT plays to data/ (not committed)
-python3 02_build_situations.py  # writes output/situations.csv
-python3 03_smooth.py            # tables, smoothers, charts
+Packages:
+
+```r
+install.packages(c("nflreadr", "dplyr", "tidyr", "purrr", "readr", "stringr",
+                   "ggplot2", "scales", "sandwich", "lmtest"))
 ```
+
+Then, from this folder (or set `proj_dir` at the top of each script):
+
+```r
+source("01_pull_pbp.R")          # ~1 min; caches Q3-OT plays to data/ (not committed)
+source("02_build_situations.R")  # writes output/situations.csv
+source("03_smooth.R")            # tables, smoothers, charts
+```
+
+Each script has a SETTINGS block at the top. Steps 2 and 3 read from the
+step 1 cache, so they re-run in seconds.
 
 ## The two situations
 
@@ -38,13 +45,13 @@ Details:
   from the first kick; the kick details come from the kick that stood.
 - **Free kicks after a safety.** These are flagged in
   `exclude_free_kick_after_safety` (18 rows) because T didn't just score.
-  `03_smooth.py` drops them.
+  `03_smooth.R` drops them.
 - **Mid-drive snaps.** `opp_ball` includes snaps where L earned a fresh 1st
   down inside its own 20–35 partway through a drive (`b_first_snap_of_drive
   = 0`, 309 rows). Filter them out if you only want drive starts.
 - **Repeated games.** Rows come from 2,064 games, and one game can contribute
   several rows (for example a kickoff, then a later L drive after a punt).
-  Those rows share a final result, so standard errors in `03_smooth.py` are
+  Those rows share a final result, so standard errors in `03_smooth.R` are
   clustered by game.
 
 ## Raw win rates (both sources pooled)
@@ -68,14 +75,17 @@ same rows: `output/raw_by_bin.csv`.
 
 ![Adjusted model](output/adjusted_curves.png)
 
-## Smoothing (`03_smooth.py`)
+## Smoothing (`03_smooth.R`)
 
-| Smoother | What it assumes | R equivalent |
+| Smoother | What it assumes | Code |
 |---|---|---|
-| LOWESS | nothing but a bandwidth (`LOWESS_FRAC`) | `lowess()`, `geom_smooth(method = "loess")` |
-| Isotonic | win % never goes *down* as time left goes up | `isoreg()` |
-| Logistic spline, per deficit | smooth in log-odds; each deficit fit on its own | `glm(t_win ~ factor(deficit) * ns(mins_left, 3), binomial)` |
-| Adjusted model | one shared time shape plus a shift for each deficit, pregame spread, situation type | `glm(t_win ~ log(mins_left + .25) + sqrt(mins_left) + factor(deficit) + t_pregame_spread + source, binomial)` |
+| LOWESS | nothing but a bandwidth (`lowess_f`) | `lowess(x, y, f = 0.6, iter = 0)`. `iter = 0` matters: the default robustness passes treat every win in 0/1 data as an outlier and flatten the curve to 0. |
+| Isotonic | win % never goes *down* as time left goes up | weighted pool-adjacent-violators in `iso_fit()` (base `isoreg()` doesn't handle tied x values cleanly) |
+| Logistic spline, per deficit | smooth in log-odds; each deficit fit on its own | `glm(y ~ factor(deficit) * ns(mins_left, 3), binomial)` |
+| Adjusted model | one shared time shape plus a shift for each deficit, pregame spread, situation type | `glm(y ~ log(mins_left + .25) + sqrt(mins_left) + factor(deficit) + t_pregame_spread + source, binomial)` |
+
+Confidence bands on both logistic models use game-clustered standard errors
+(`sandwich::vcovCL(m, cluster = ~ game_id)`).
 
 For the adjusted model I compared seven time shapes by AIC/BIC (table in
 `output/model_summary.txt`):
@@ -85,7 +95,7 @@ For the adjusted model I compared seven time shapes by AIC/BIC (table in
 - **Why not log(t) alone:** it overstates win % in the last 2 minutes (3% vs
   under 1% observed).
 - **Per-deficit time slopes** made BIC worse, so the four curves share one
-  shape. Change `ADJ_MODEL` to try another candidate.
+  shape. Change `adj_model` to try another candidate.
 - **Calibration** (observed vs predicted by time bin) is printed and saved
   with the model summary.
 
@@ -115,9 +125,8 @@ Other things in the model:
   late in the game: the raw data has 1 win in 94 down-9 rows with under 10
   minutes left. Per-deficit fits (blue lines in the first chart) show the
   collapse. A hierarchical model that partially pools the deficit × time
-  terms would be the principled middle ground: `brms` / `rstanarm` in R,
-  `bambi` / `pymc` in Python, or `mgcv::gam(..., s(mins_left, by = deficit))`
-  with penalized smooths.
+  terms would be the principled middle ground: `brms` / `rstanarm`, or
+  penalized smooths with `mgcv::gam(y ~ s(mins_left, by = factor(deficit)) + ...)`.
 - **Rules changed over time.** `kick_era` groups the seasons:
   - 2011: kickoffs moved from the 30 to the 35.
   - 2016: touchbacks came out to the 25.
@@ -131,7 +140,7 @@ Other things in the model:
   2025 regular-season OT gives both teams a possession, which matters for
   down 7 and 8. Win rate by era: 10.4%, 11.1%, 9.3%, 8.3%.
 - **Ties are losses in `t_win`.** That covers 6 rows. Use `t_tie` to count
-  them as half a win, or switch `OUTCOME` to `t_forced_ot_or_won_reg` to
+  them as half a win, or switch `outcome` to `t_forced_ot_or_won_reg` to
   model "tied or led at the end of regulation" and skip overtime.
 - **nflfastR's model isn't an independent check.** `nflfastr_vegas_wp_t` was
   fit on this same history, so it's a well-made smoother of the same data.
@@ -210,9 +219,9 @@ Other things in the model:
 
 | File | What |
 |---|---|
-| `01_pull_pbp.py` | downloads play-by-play with `nflreadpy` (Python's `nflreadr`) and caches Q3–OT plays |
-| `02_build_situations.py` | builds the situations; has a pandas ↔ dplyr cheat sheet at the top |
-| `03_smooth.py` | binned rates, LOWESS, isotonic, logistic splines, adjusted model, charts |
+| `01_pull_pbp.R` | downloads play-by-play with `nflreadr::load_pbp()` and caches Q3–OT plays to `data/pbp_q3_to_ot.rds` |
+| `02_build_situations.R` | builds the situations (dplyr; the look-ahead outcomes use a non-equi `join_by()`) |
+| `03_smooth.R` | binned rates, LOWESS, isotonic, logistic splines, adjusted model, ggplot2 charts |
 | `output/situations.csv` | the raw data, one row per situation |
 | `output/raw_by_bin.csv` | rates by source × deficit × time bin, with Wilson 95% CIs |
 | `output/smoothed_curves.csv` | every smoother on a 0–15 minute grid (15-second steps) |
