@@ -1,0 +1,3 @@
+# Cached play-by-play pulls are large and easy to rebuild with 01_pull_pbp.py
+data/pbp_*.parquet
+__pycache__/
