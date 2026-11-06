@@ -337,8 +337,11 @@ kfee <- function(price, contracts = 1, fee = kalshi_fee) ceiling(100 * fee * con
 # max_cost: most to spend on any one market at a time, as a share of bankroll.
 # min_edge: smallest model probability minus fee-inclusive price worth buying (a side that
 # trims a held position is always allowed). price_range: only buy at prices in this range.
+# hedge: also let sides below min_edge be bought, valued as if their edge were at most zero
+# (the model's small edges aren't trusted), so they're bought only where they lower the risk
+# of the rest of the book - say, the other team to win against held spread contracts.
 kelly_orders <- function(p, Y, quotes, positions = NULL, bankroll, gamma = 1, fee = kalshi_fee,
-                         max_cost = 0.25, min_edge = 0, price_range = c(0.005, 0.995)) {
+                         max_cost = 0.25, min_edge = 0, price_range = c(0.005, 0.995), hedge = FALSE) {
   q <- as.data.table(quotes)[match(colnames(Y), ticker)]
   if (is.null(q$yes_depth)) q[, yes_depth := Inf]
   if (is.null(q$no_depth))  q[, no_depth := Inf]
@@ -354,12 +357,14 @@ kelly_orders <- function(p, Y, quotes, positions = NULL, bankroll, gamma = 1, fe
   py <- as.vector(crossprod(Y, p))
   cand[, p_win := ifelse(side == "yes", py[j], 1 - py[j])]
   cand[, edge := p_win - cost]
-  cand <- cand[edge > min_edge | (side == "yes" & pos[j] < 0) | (side == "no" & pos[j] > 0)]
+  cand[, below := edge <= min_edge]
+  if (!hedge) cand <- cand[!below | (side == "yes" & pos[j] < 0) | (side == "no" & pos[j] > 0)]
+  cand[, cost_opt := fifelse(below & hedge, pmax(cost, p_win), cost)]   # what the optimizer is told it pays
   empty <- list(orders = data.table(), growth = 0, ev = 0, candidates = cand)
   if (nrow(cand) == 0) return(empty)
 
   R <- sapply(seq_len(nrow(cand)), function(i) {
-    y <- Y[, cand$j[i]]; (if (cand$side[i] == "yes") y else 1 - y) - cand$cost[i]
+    y <- Y[, cand$j[i]]; (if (cand$side[i] == "yes") y else 1 - y) - cand$cost_opt[i]
   })
   if (is.null(dim(R))) R <- matrix(R, nrow = length(p))
   U  <- if (gamma == 1) function(w) log(w) else function(w) (w^(1 - gamma) - 1) / (1 - gamma)
@@ -376,8 +381,7 @@ kelly_orders <- function(p, Y, quotes, positions = NULL, bankroll, gamma = 1, fe
   }
   upper <- pmin(cand$depth / bankroll, max_cost / cand$cost)
   # a side let in only because it trims a held position can sell that position, not go past flat
-  trim_only <- cand$edge <= min_edge
-  upper[trim_only] <- pmin(upper[trim_only], abs(pos[cand$j[trim_only]]) / bankroll)
+  if (!hedge) upper[cand$below] <- pmin(upper[cand$below], abs(pos[cand$j[cand$below]]) / bankroll)
   op <- optim(rep(0, nrow(cand)), f, gr, method = "L-BFGS-B", lower = 0, upper = upper,
               control = list(factr = 1e7, maxit = 500))
   cand[, contracts := floor(op$par * bankroll + 1e-9)]
@@ -389,7 +393,7 @@ kelly_orders <- function(p, Y, quotes, positions = NULL, bankroll, gamma = 1, fe
   list(orders = o[, .(ticker, side, contracts, price, fee, cost = cost_total, p_win = round(p_win, 4),
                       edge = round(edge, 4))],
        growth = sum(p * U(pmax(w1, floor_w))) - sum(p * U(w0)),
-       ev = sum(p * (w1 - w0)) * bankroll,
+       ev = sum(o$contracts * o$edge),   # at the model's own probabilities, hedges included
        p_lose = sum(p[w1 < w0]),
        candidates = cand)
 }

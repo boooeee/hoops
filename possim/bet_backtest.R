@@ -17,6 +17,7 @@
 #
 #   Rscript bet_backtest.R                         every game with quotes and play-by-play
 #   Rscript bet_backtest.R 2026-10-20 2026-11-04   games in a date range
+#   Rscript bet_backtest.R 2026-10-20 2026-11-04 v2   the same, saved as backtest_<from>_<to>_v2
 
 here <- local({
   f <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
@@ -35,10 +36,13 @@ strategies <- list(
   quarter_kelly = list(gamma = 4, min_edge = 0,    range = c(0.005, 0.995), kinds = c("game", "spread", "total")),
   quarter_2c    = list(gamma = 4, min_edge = 0.02, range = c(0.05, 0.95),   kinds = c("game", "spread", "total")),
   quarter_2c_win = list(gamma = 4, min_edge = 0.02, range = c(0.05, 0.95),  kinds = "game"))
+# hedge = TRUE in a strategy lets it buy sides below the minimum edge as hedges (see kelly_orders).
+# In 2025-26 that cut profit about as much as it cut the swings (README), so none of these use it.
 
 args <- commandArgs(trailingOnly = TRUE)
 date_from <- if (length(args) >= 1) as.Date(args[1]) else as.Date("2025-10-01")
 date_to   <- if (length(args) >= 2) as.Date(args[2]) else Sys.Date()
+out_tag   <- if (length(args) >= 3) paste0("_", args[3]) else ""     # keeps a run from overwriting another
 
 # ── Games ────────────────────────────────────────────────────────────────────
 mkts <- fread(file.path(kalshi_dir, "markets.csv"), colClasses = list(character = "gid"))
@@ -106,7 +110,7 @@ one_game <- function(gid) {
       if (!any(keep) || cash[[s]] < 1) next
       o <- kelly_orders(d$p, Y[, keep, drop = FALSE], quotes[keep], positions = pos[[s]], bankroll = cash[[s]],
                         gamma = S$gamma, min_edge = S$min_edge, price_range = S$range,
-                        max_cost = max_order / cash[[s]])$orders
+                        max_cost = max_order / cash[[s]], hedge = isTRUE(S$hedge))$orders
       if (nrow(o) == 0) next
       if (sum(o$cost) > cash[[s]]) {        # no more than the cash on hand
         o[, contracts := floor(contracts * cash[[s]] / sum(cost) * 0.999)]
@@ -152,6 +156,6 @@ bt <- list(contracts = rbindlist(lapply(ok, `[[`, "contracts")), orders = rbindl
            games = rbindlist(lapply(ok, `[[`, "game")), strategies = strategies,
            settings = list(bankroll = bankroll, max_order = max_order, nsim = nsim, quote_lag = quote_lag,
                            from = date_from, to = date_to))
-saveRDS(bt, rds(sprintf("backtest_%s_%s", format(date_from), format(date_to))))
+saveRDS(bt, rds(sprintf("backtest_%s_%s%s", format(date_from), format(date_to), out_tag)))
 message(sprintf("%d games, %d decisions, %d orders in %.1f min", nrow(bt$games), uniqueN(bt$contracts[, .(gid, dec)]),
                 nrow(bt$orders), as.numeric(difftime(Sys.time(), t0, units = "mins"))))

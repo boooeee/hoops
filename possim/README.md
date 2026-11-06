@@ -170,7 +170,8 @@ Rscript bet_report.R backtest_2025-10-21_2026-06-30
   from Q3, from the backtest below.
 
 **Backtest: 2025-26, 1,315 games including the playoffs, 24,832 stoppages.**
-Buying at the ask, $1,000 a game, 95% intervals from resampling games.
+Buying at the ask, $1,000 a game, 95% intervals from resampling games. Saved as
+`backtest_2025-10-21_2026-06-30_hedge`.
 
 - **Profit by strategy** (return on money staked):
 
@@ -178,16 +179,20 @@ Buying at the ask, $1,000 a game, 95% intervals from resampling games.
   |---|---|---|
   | Full Kelly | 1.3% (0.2 to 2.3) | $17 |
   | Quarter Kelly | 2.5% (2.0 to 2.9) | $30 |
-  | Quarter Kelly, 2¢ minimum edge, prices 5–95¢ | **5.7% (5.0 to 6.6)** | **$49** |
-  | The same, win markets only | 3.1% (1.7 to 4.6) | $3 |
+  | Quarter Kelly, 2¢ minimum edge, prices 5–95¢ | **6.2% (5.4 to 7.1)** | **$49** |
+  | The same, win markets only | 3.4% (1.9 to 5.0) | $3 |
 
+  An earlier run, before a side below the minimum edge was stopped from going
+  past flat, had the third strategy at 5.7% (5.0 to 6.6), the same $49 a game
+  on more money staked. The checks under "Is it real?" and "Part of it is
+  speed" were done on that run.
 - **Where the third strategy made money** (return by quarter):
 
   | | Q1 | Q2 | Q3 | Q4 | OT |
   |---|---|---|---|---|---|
-  | Win | 2.8% (−4.4 to 11.1) | −0.7% (−8.0 to 6.8) | 1.6% (−3.4 to 6.1) | **5.5%** (2.3 to 8.8) | 5.5% |
-  | Spread | **4.6%** (2.4 to 7.0) | **3.1%** (0.9 to 5.5) | **4.0%** (2.7 to 5.4) | **7.9%** (6.3 to 9.8) | 7.4% |
-  | Total | 1.9% (−1.7 to 5.3) | −1.8% (−4.4 to 1.0) | **3.5%** (1.5 to 5.4) | **14.4%** (11.2 to 17.3) | 34% |
+  | Win | 2.2% (−6.1 to 10.8) | 5.5% (−0.7 to 12.4) | 1.5% (−3.3 to 6.5) | **5.6%** (2.2 to 9.0) | 7.1% |
+  | Spread | **4.0%** (1.4 to 6.3) | **3.2%** (1.1 to 5.5) | **4.3%** (2.6 to 5.9) | **8.5%** (6.6 to 10.3) | 9.1% |
+  | Total | 1.8% (−1.6 to 5.2) | −1.9% (−4.7 to 0.5) | **3.3%** (1.2 to 5.2) | **15.9%** (12.8 to 19.8) | 45% |
 
   Q4 totals made the most: in the last two minutes, in close games, on the
   over, and at free-throw breaks. That's where late fouling adds points, and
@@ -220,6 +225,20 @@ Buying at the ask, $1,000 a game, 95% intervals from resampling games.
   - The model is better on spreads and totals in Q4.
   - Most spread and total strikes are wider than 2¢, and there the mid is a
     poor guess. Scored against it, the model looks better than it is.
+- **Hedging doesn't pay.** `kelly_orders(hedge = TRUE)` also lets Kelly buy
+  sides below the minimum edge, counted as having no edge, so it buys them only
+  to cut risk. Each hedging strategy was compared with its counterpart game by
+  game, on the same simulations:
+  - Quarter Kelly with the 2¢ minimum: $44 a game instead of $49 (−$5.83,
+    −8.78 to −2.96), and 4.7% instead of 6.2%.
+  - Plain quarter Kelly: $25 a game instead of $30 (−$4.90, −7.29 to −2.48).
+  - It does cut the swings: the SD of a game's result is 10% lower ($117
+    against $130). But profit fell about as much, so profit per unit of risk
+    didn't improve (0.37 against 0.38). That's no better than betting a little
+    less, and the log growth of the bankroll is lower.
+  - The hedges themselves about broke even. The loss came from the edge bets made
+    alongside them, mostly totals.
+  - So it's off by default, and not a setting in `bet_live.R`.
 - **Depth:** minute quotes carry no depth, so every backtest order is assumed to
   fill, up to $100 per market per stoppage.
 
