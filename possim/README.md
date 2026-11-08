@@ -141,13 +141,61 @@ bets to make and how many contracts of each:
 | [bet_live.R](bet_live.R) | The live loop for today's games: prints recommended orders at each stoppage and keeps a paper ledger. Sends nothing to Kalshi |
 | [bet_backtest.R](bet_backtest.R) | Replays held-out games against the Kalshi quotes saved by `kalshiNBA_rtask.R` |
 | [bet_report.R](bet_report.R) | Reads a backtest: model against market, and profit and loss by strategy, kind, price and period |
+| [bet_game.R](bet_game.R) | One backtest game, stoppage by stoppage: the model's numbers and Kalshi's, and every bet a strategy bought or sold |
+| [console.R](console.R) | A betting console in the browser: a scoreboard of every game that flags stoppages, and for the game picked, the model against Kalshi at each stoppage with a button for each order. Paper, replay, or live |
+| [kalshi_trade.R](kalshi_trade.R) | Signed Kalshi requests: balance, positions, and immediate-or-cancel limit orders |
 
 ```bash
 Rscript bet_live.R             # every game today, until the last one ends
 Rscript bet_live.R PHX         # one team's game
 Rscript bet_backtest.R 2025-10-21 2026-06-30
 Rscript bet_report.R backtest_2025-10-21_2026-06-30
+Rscript bet_game.R 2026-01-28 IND    # one game from the backtest (no arguments: a random one)
 ```
+
+**The console.** `Rscript console.R` opens http://127.0.0.1:8765 (this machine only).
+- **Modes:**
+  - `Rscript console.R` is paper: tonight's games, nothing sent to Kalshi.
+  - `Rscript console.R replay 2026-11-04 5` plays back a past night's games at 5× against
+    their saved quotes, also paper. `replay 0022500672` plays back one game.
+  - `Rscript console.R live` can send real orders, but only after arming in the page by
+    typing `bet` and pressing Enter.
+- **The scoreboard** along the top shows every game, read from the NBA's feed every few
+  seconds. A game whose play is stopped, with time left to bet it, turns amber with the time
+  left ("Timeout · 0:52 to bet"). Click a game to bet it. Each game is set up in the background
+  when the console starts (the model anchored to its line and total, about 10 seconds a game),
+  so switching is quick. A game's orders come back if you switch away and return while its
+  stoppage lasts.
+- **Which markets:** unlike `bet_live.R`, it bets every kind of market in every quarter.
+  The quarter rules came from the same backtest they were judged on.
+- **At each stoppage** it lists the orders Kelly wants, each with a button. A click opens a
+  confirmation, and nothing is sent until it's confirmed.
+- **Every order is a limit at the price shown, immediate-or-cancel.** It fills now at that
+  price or better, or not at all, so nothing is left resting on the book. Sells are
+  reduce-only.
+- **Spending limits** in `console_settings`: $10 an order, $100 a game, $200 a night, net of
+  sells. Orders are cut to fit. Kelly sizes against a $200 bankroll a game.
+- **When buttons lock:** once play resumes in the feed; at an ordinary stoppage, 90 seconds after
+  the console first sees it (in any game, so picking a game late doesn't restart the clock), or
+  straight away if it reached the feed more than 60 seconds late; at a
+  break between periods, 2 minutes after the period ended (14 at halftime), however late it
+  was seen. The feed runs 20–60 seconds behind, so watch the game too. **Recheck prices**
+  works a stoppage's orders out again from Kalshi's latest prices, for long breaks.
+- **Live safeguards:**
+  - A failed order disarms the console, and so does switching games.
+  - The night's first real order is held to 1 contract, so you can check it on Kalshi.
+  - Positions and cash for Kelly come from Kalshi itself.
+- **Fund the NBA shard first.** Kalshi keeps a separate cash balance for each group of markets
+  (shard). NBA markets are on shard 3, and deposits sit on shard 0. Kalshi's app moves cash across
+  by itself; API orders don't, and Kalshi refuses them with "insufficient shard balance". **Fund NBA
+  shard** moves a confirmed amount, up to the night's limit, so the shard's cash is a second cap.
+- **Logs:** every order goes to `data_dir/live/<date>_orders.csv`, with what filled and at what price.
+  It also records the model's probability and edge for the side bought, and the stoppage. Timing too:
+  how long the feed took to show the stoppage, and how long after the orders were worked out you clicked.
+- **Credentials:** `KALSHI_API_KEY_ID`, and the key at `KALSHI_KEY_PATH` (default: the one in
+  `~/Dropbox/kalshi`).
+- **Kalshi's API:** orders use its V2 endpoint (`POST /portfolio/events/orders`, side `bid` to
+  buy YES and `ask` to sell YES, priced in YES terms).
 
 **Turning a stoppage into a state.**
 - **Quarter break:** the next period's first possession.

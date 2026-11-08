@@ -78,8 +78,9 @@ kalshi_series <- c(game = "KXNBAGAME", spread = "KXNBASPREAD", total = "KXNBATOT
 kget <- function(path, query = list()) {
   resp <- httr2::request(kalshi_api) |> httr2::req_url_path_append(path) |> httr2::req_url_query(!!!query) |>
     httr2::req_user_agent("hoops-possim-live") |> httr2::req_timeout(15) |>
-    httr2::req_retry(max_tries = 3, is_transient = \(r) httr2::resp_status(r) %in% c(429, 500, 502, 503, 504),
-                     backoff = \(i) 0.5 * i) |>
+    # jittered, so games being set up side by side don't all retry at the same moment
+    httr2::req_retry(max_tries = 4, is_transient = \(r) httr2::resp_status(r) %in% c(429, 500, 502, 503, 504),
+                     backoff = \(i) runif(1, 1, 2) * 2^(i - 1)) |>
     httr2::req_perform()
   jsonlite::fromJSON(httr2::resp_body_string(resp), flatten = TRUE)
 }
@@ -101,7 +102,7 @@ kalshi_quotes <- function(gm) {
     data.table(ticker = m$ticker, kind = k, status = m$status, floor_strike = num(m$floor_strike),
                yes_bid = num(m$yes_bid_dollars), yes_ask = num(m$yes_ask_dollars),
                no_ask = num(m$no_ask_dollars), yes_ask_size = num(m$yes_ask_size_fp),
-               no_ask_size = num(m$yes_bid_size_fp))
+               no_ask_size = num(m$yes_bid_size_fp), shard = num(m$exchange_index))
   }))
   if (nrow(mk) == 0) return(mk)
   mk[, team := ifelse(kind == "total", NA_character_, sub("[0-9.]+$", "", sub(".*-", "", ticker)))]
@@ -175,13 +176,17 @@ feed_actions <- function(su) {
     if (!is.null(j)) break
   }
   if (is.null(j)) stop("couldn't read the NBA play-by-play for ", su$gid)
-  a <- as.data.table(j$game$actions)
+  feed_table(j$game$actions, su$game)
+}
+# the live file's actions, parsed, in the form game_actions() gives
+feed_table <- function(a, gm) {
+  a <- as.data.table(a)
   for (cn in c("descriptor", "possession", "teamId", "teamTricode", "shotResult", "subType", "description"))
     if (!cn %in% names(a)) a[, (cn) := NA]
   a <- a[, .(orderNumber, actionNumber, clock, timeActual, period, actionType, subType, descriptor,
              possession, scoreHome = as.numeric(scoreHome), scoreAway = as.numeric(scoreAway),
              teamId, teamTricode, shotResult, description)]
-  tidy_actions(a, su$game)
+  tidy_actions(a, gm)
 }
 
 tidy_actions <- function(a, gm) {
@@ -325,6 +330,15 @@ market_matrix <- function(d, mk) {
   if (is.null(dim(Y))) Y <- matrix(Y, nrow = 1)
   colnames(Y) <- mk$ticker
   Y
+}
+
+# A side of a contract as a sportsbook bet: "OKC -7.5" pays if OKC wins by 8 or more, "HOU +7.5"
+# if HOU wins or loses by 7 or fewer, "Over 225.5" on 226 points or more.
+bet_label <- function(kind, x, yes_over, side, home, away) {
+  over <- (yes_over == 1) == (side == "yes")      # pays when the margin (home minus away) or total is above x
+  fifelse(kind == "total", sprintf("%s %.1f", fifelse(over, "Over", "Under"), x),
+  fifelse(kind == "game", sprintf("%s to win", fifelse(over, home, away)),
+          fifelse(over, sprintf("%s %+.1f", home, -x), sprintf("%s %+.1f", away, x))))
 }
 
 kfee <- function(price, contracts = 1, fee = kalshi_fee) ceiling(100 * fee * contracts * price * (1 - price) - 1e-9) / 100

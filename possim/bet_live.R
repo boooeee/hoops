@@ -121,7 +121,18 @@ decide <- function(su, act, quotes, book, s = live_settings) {
                      margin_model = sum(d$p * (d$hf - d$af)), margin_market = lines[["margin"]],
                      total_model = sum(d$p * (d$hf + d$af)), total_market = lines[["total"]],
                      cash = book$cash, n_orders = nrow(o), spend = if (nrow(o)) sum(o$cost) else 0)
-  list(info = info, orders = o)
+  # the best sides on offer, bought or not, and why each wasn't: so a stoppage with no bets says why
+  pm <- as.vector(crossprod(Y, d$p))
+  near <- rbind(q[, .(ticker, kind, x, yes_over, side = "yes", price = yes_ask, p_win = pm)],
+                q[, .(ticker, kind, x, yes_over, side = "no", price = no_ask, p_win = 1 - pm)])[!is.na(price) & price > 0 & price < 1]
+  near[, edge := p_win - price - kalshi_fee * price * (1 - price)]
+  near[, why := fcase(!kind %in% bet_kinds, sprintf("%s not bet in this quarter", kind),
+                      price < s$price_range[1] | price > s$price_range[2], "price outside the range",
+                      edge <= s$min_edge, sprintf("edge under %.0f¢", 100 * s$min_edge),
+                      ticker %in% o$ticker, "", default = "Kelly sized it to nothing")]
+  near[, bet := bet_label(kind, x, yes_over, side, gm$htm, gm$atm)]
+  near <- head(near[order(-edge)][!duplicated(bet)], 8)     # yes on one team = no on the other: keep the better
+  list(info = info, orders = o, model = data.table(ticker = colnames(Y), p_yes = pm), near = near)
 }
 
 show_decision <- function(r, secs) {
