@@ -170,19 +170,28 @@ Rscript bet_game.R 2026-01-28 IND    # one game from the backtest (no arguments:
   The quarter rules came from the same backtest they were judged on.
 - **At each stoppage** it lists the orders Kelly wants, each with a button. A click opens a
   confirmation, and nothing is sent until it's confirmed.
+- **Two boxes in the bar** trade a gate for speed, for when prices move too fast. Both start
+  unticked (set `one_click` or `stay_armed` in `console_settings` to start them ticked); untick
+  either to go back.
+  - **One-click orders:** a Buy or Sell button sends its order the moment it's clicked, with no
+    confirmation. Live, turning it on asks once. The badge shows ONE-CLICK while it's on, and
+    every other check still applies: armed, the limits, the price, the time window, and one
+    order per button (the button goes dead on the first click).
+  - **Stay armed across games** (live): switching games no longer disarms the console.
 - **Every order is a limit at the price shown, immediate-or-cancel.** It fills now at that
   price or better, or not at all, so nothing is left resting on the book. Sells are
   reduce-only.
-- **Spending limits** in `console_settings`: $10 an order, $100 a game, $200 a night, net of
-  sells. Orders are cut to fit. Kelly sizes against a $200 bankroll a game.
-- **When buttons lock:** once play resumes in the feed; at an ordinary stoppage, 90 seconds after
+- **Spending limits** in `console_settings`: $30 an order, $300 a game, $500 a night, net of
+  sells. Orders are cut to fit. Kelly sizes against a $500 bankroll a game.
+- **When buttons lock:** once play resumes in the feed; at an ordinary stoppage, 180 seconds after
   the console first sees it (in any game, so picking a game late doesn't restart the clock), or
   straight away if it reached the feed more than 60 seconds late; at a
   break between periods, 2 minutes after the period ended (14 at halftime), however late it
   was seen. The feed runs 20–60 seconds behind, so watch the game too. **Recheck prices**
   works a stoppage's orders out again from Kalshi's latest prices, for long breaks.
 - **Live safeguards:**
-  - A failed order disarms the console, and so does switching games.
+  - A failed order disarms the console, and so does switching games (unless **Stay armed
+    across games** is ticked).
   - The night's first real order is held to 1 contract, so you can check it on Kalshi.
   - Positions and cash for Kelly come from Kalshi itself.
 - **Fund the NBA shard first.** Kalshi keeps a separate cash balance for each group of markets

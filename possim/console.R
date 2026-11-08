@@ -16,9 +16,12 @@
 #
 # Guardrails:
 #   - Real orders only in `live` mode, and only after arming in the page by typing bet (Enter
-#     arms). Any failed order disarms it. Switching games disarms it.
-#   - One click opens a confirmation; nothing is sent until it's confirmed. One order per
-#     button, once.
+#     arms). Any failed order disarms it. Switching games disarms it, unless "Stay armed across
+#     games" is ticked.
+#   - One click opens a confirmation; nothing is sent until it's confirmed. With "One-click
+#     orders" ticked (live: after confirming that once), a Buy or Sell button sends its order
+#     straight away; every other check here still applies. One order per button, once.
+#   Both boxes start unticked unless console_settings says otherwise; untick to go back.
 #   - Every order is a limit at the price shown, immediate-or-cancel: it fills now at that
 #     price or better, or not at all. Nothing is ever left resting on Kalshi's book.
 #   - Sells are reduce-only: they can close a position, never flip it.
@@ -43,20 +46,24 @@ source(file.path(here, "kalshi_trade.R"))
 suppressPackageStartupMessages(library(shiny))
 
 console_settings <- modifyList(live_settings, list(
-  bankroll      = 200,    # Kelly sizes a game against this, less what the game has cost so far
-  max_order     = 10,     # most one order can cost, fee included (also Kelly's most per market per stoppage)
-  max_game      = 100,     # most one game's orders can cost in all, net of anything sold
-  max_night     = 200,    # most tonight's orders can cost in all, net of anything sold
-  max_contracts = 200,    # most contracts in one order
+  bankroll      = 500,    # Kelly sizes a game against this, less what the game has cost so far
+  max_order     = 30,     # most one order can cost, fee included (also Kelly's most per market per stoppage)
+  max_game      = 300,     # most one game's orders can cost in all, net of anything sold
+  max_night     = 500,    # most tonight's orders can cost in all, net of anything sold
+  max_contracts = 500,    # most contracts in one order
   # every kind of market in every quarter. bet_live.R's default (win markets from Q4, totals from
   # Q3) was picked from the same 2025-26 backtest it's judged on, so it may be fitting noise
   bet_when      = list(game = 1:5, spread = 1:5, total = 1:5),
-  valid_for     = 90,     # seconds a stoppage's orders stay clickable
+  valid_for     = 180,     # seconds a stoppage's orders stay clickable
   # breaks between periods last longer (NBA: 130 s between quarters and before overtime, 15
   # minutes at halftime): their orders stay clickable, and a late one still counts, until this
   # many seconds after the period ended
   break_open    = c(quarter = 120, half = 840),
-  poll          = 4))     # seconds between reads of the feed and Kalshi
+  poll          = 4,      # seconds between reads of the feed and Kalshi
+  # the two boxes in the page, as they start. Both FALSE is the safer way: every order confirmed,
+  # and the console disarmed whenever the game changes
+  one_click     = FALSE,  # a Buy or Sell button sends its order at once, with no confirmation
+  stay_armed    = FALSE)) # switching games leaves the console armed
 
 args <- commandArgs(trailingOnly = TRUE)
 run_mode <- if ("live" %in% args) "live" else if ("replay" %in% args) "replay" else "paper"
@@ -245,6 +252,8 @@ table.t td { padding: 7px 8px; border-bottom: 1px solid #f0f2f5; }
 .sell { color: #b45309; font-weight: 700; } .buy { color: #15803d; font-weight: 700; }
 .why { color: #6b7280; font-size: 12px; }
 .budget { font-variant-numeric: tabular-nums; }
+.bar .form-group, .bar .checkbox { margin: 0; } .bar .checkbox label { font-weight: 600; }
+.m-oneclick { background: #f59e0b; color: #1d2330; }
 .warn { background: #fff4e5; border: 1px solid #f5c27a; border-radius: 8px; padding: 8px 12px; }
 .board { display: flex; gap: 8px; flex-wrap: wrap; margin: 2px 0 14px; }
 .tile { background: white; border: 1px solid #e3e6eb; border-radius: 8px; padding: 6px 10px; min-width: 158px;
@@ -275,9 +284,11 @@ ui <- fluidPage(
       uiOutput("mode_badge", inline = TRUE),
       if (run_mode == "live") tagList(actionButton("arm", "Arm real orders", class = "btn-danger"),
                                   actionButton("disarm", "Disarm", class = "btn-secondary"),
+                                  checkboxInput("stay_armed", "Stay armed across games", value = isTRUE(console_settings$stay_armed)),
                                   actionButton("check", "Check Kalshi connection", class = "btn-outline-secondary"),
                                   actionButton("fund", "Fund NBA shard", class = "btn-outline-secondary")),
       if (run_mode == "replay") tagList(actionButton("pause", "Pause / resume"), actionButton("next_stop", "Jump to next stoppage")),
+      checkboxInput("one_click", "One-click orders", value = isTRUE(console_settings$one_click)),
       uiOutput("budget", inline = TRUE)),
   uiOutput("board"),
   uiOutput("conn"),
@@ -292,7 +303,8 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   s <- console_settings
   rv <- reactiveValues(games = data.table(), sel = NULL, su = NULL, act = NULL, q = NULL, dec = NULL, armed = FALSE,
-                       orders = read_orders(), kpos = NULL, conn = NULL, err = NULL, pending = NULL, open = FALSE)
+                       orders = read_orders(), kpos = NULL, conn = NULL, err = NULL, pending = NULL, open = FALSE,
+                       one_click = isTRUE(s$one_click), stay_armed = isTRUE(s$stay_armed), redraw = 0)
   env <- new.env()                     # state that shouldn't trigger redraws
   # each game's anchoring (line, total, tip, and the model's fit to them), so a restart needn't
   # redo it. Just those: a whole setup carries the model and takes minutes to save
@@ -514,7 +526,8 @@ server <- function(input, output, session) {
   # picking a game on the scoreboard. Its orders from earlier come back, unless play has moved on
   select_game <- function(id) {
     if (is.null(id) || !nzchar(id) || identical(id, rv$sel) || !id %in% rv$games$gid) return()
-    rv$sel <- id; rv$armed <- FALSE
+    rv$sel <- id
+    if (!isTRUE(rv$stay_armed)) rv$armed <- FALSE
     rv$act <- NULL; rv$q <- NULL; rv$kpos <- NULL; rv$err <- NULL; rv$conn <- NULL
     d <- env$decs[[id]]; b <- env$board[[id]]
     if (!is.null(d) && !d$expired && !identical(b$key, paste(id, d$stop_order))) d$expired <- TRUE
@@ -543,7 +556,9 @@ server <- function(input, output, session) {
   if (run_mode == "live") {
     observeEvent(input$arm, {
       showModal(modalDialog(title = "Arm real orders?",
-        HTML(sprintf(paste0("<p>Orders will be sent to Kalshi with real money, one confirmed click at a time.</p>",
+        HTML(sprintf(paste0("<p>Orders will be sent to Kalshi with real money, ",
+                            if (rv$one_click) "<b>one click each, with no confirmation</b> (one-click orders are on).</p>"
+                            else "one confirmed click at a time.</p>",
                             "<p>Limits: <b>$%d</b> an order, <b>$%d</b> a game, <b>$%d</b> tonight, net of sells. Each order is a limit at the price shown, ",
                             "immediate-or-cancel.</p><p>Type <b>bet</b> and press Enter to arm.</p>"), s$max_order, s$max_game, s$max_night)),
         tags$input(id = "arm_word", type = "text", class = "form-control", autocomplete = "off", spellcheck = "false"),
@@ -554,6 +569,7 @@ server <- function(input, output, session) {
       else showNotification("Not armed: type bet.", type = "warning")
     })
     observeEvent(input$disarm, { rv$armed <- FALSE })
+    observeEvent(input$stay_armed, { rv$stay_armed <- isTRUE(input$stay_armed) }, ignoreInit = TRUE)
     # the shard this game's markets trade on (Kalshi says so on each market; NBA has been 3)
     game_shard <- function() { v <- if (!is.null(rv$q) && !is.null(rv$q$shard)) rv$q$shard[!is.na(rv$q$shard)][1] else NA
                                if (length(v) == 0 || is.na(v)) nba_shard else as.integer(v) }
@@ -636,8 +652,14 @@ server <- function(input, output, session) {
     dec <- rv$dec; p <- input$place
     if (is.null(dec) || !identical(p$key, dec$key)) return()
     r <- dec$rows[row == p$row]
-    if (nrow(r) == 0 || why_not(dec, r) != "") return()
+    if (nrow(r) == 0) return()
+    why <- why_not(dec, r)
+    if (why != "") {
+      if (!grepl("^(sending|filled|part filled|nothing filled|error)", why)) showNotification(paste("Not sent:", why), type = "warning")
+      rv$redraw <- rv$redraw + 1; return()
+    }
     n <- row_count(r)
+    if (rv$one_click) return(send_order(list(key = dec$key, row = r$row, n = n)))
     worst <- n * r$price + kfee(r$price, n)
     what <- if (r$action == "BUY")
       sprintf("<b>Buy %d × %s</b> at %.0f¢ or better: at most <b>$%.2f</b> with the fee. Model %.0f%%, edge %+.1f¢.",
@@ -658,6 +680,10 @@ server <- function(input, output, session) {
   observeEvent(input$confirm, {
     removeModal()
     pd <- rv$pending; rv$pending <- NULL
+    send_order(pd)
+  })
+  # one order, as confirmed in the dialog or (one-click) as clicked. Everything is checked again here
+  send_order <- function(pd) {
     rv$orders <- read_orders()
     dec <- rv$dec
     if (is.null(pd) || is.null(dec) || !identical(pd$key, dec$key)) return()
@@ -693,14 +719,32 @@ server <- function(input, output, session) {
     rows <- copy(dec$rows)
     rows[row == pd$row, status := if (rec$filled > 0) sprintf("%s %g @ %.0f¢", rec$status, rec$filled, 100 * rec$avg_price) else rec$status]
     dec$rows <- rows; rv$dec <- dec
+    if (rec$status != "error")
+      showNotification(sprintf("%s %d × %s: %s", if (r$action == "BUY") "Buy" else "Sell", n, r$bet,
+                               if (rec$filled > 0) sprintf("%s %g @ %.0f¢", rec$status, rec$filled, 100 * rec$avg_price) else rec$status),
+                       type = if (rec$filled > 0) "message" else "warning", duration = 6)
     if (run_mode == "live") rv$kpos <- tryCatch(kalshi_positions(unique(sub("-[^-]*$", "", rv$q$ticker))), error = function(e) rv$kpos)
-  })
+  }
+  # one-click orders: in live mode, turned on only after saying so once; off at once
+  observeEvent(input$one_click, {
+    on <- isTRUE(input$one_click)
+    if (identical(on, rv$one_click)) return()
+    if (on && run_mode == "live")
+      showModal(modalDialog(title = "Turn on one-click orders?",
+        HTML(paste0("<p>A Buy or Sell button will send its order to Kalshi <b>the moment it's clicked</b>, with no confirmation.</p>",
+                    "<p>Everything else still holds: the console must be armed, the spending limits, the price limit, ",
+                    "immediate-or-cancel, one order per button, and the time window. Untick the box to go back.</p>")),
+        footer = tagList(actionButton("one_click_no", "Cancel"), actionButton("one_click_yes", "Turn on", class = "btn-danger"))))
+    else rv$one_click <- on
+  }, ignoreInit = TRUE)
+  observeEvent(input$one_click_yes, { rv$one_click <- TRUE; removeModal() })
+  observeEvent(input$one_click_no, { updateCheckboxInput(session, "one_click", value = FALSE); removeModal() })
 
   # ── drawing ──
   output$mode_badge <- renderUI({
     cls <- switch(run_mode, paper = "m-paper", replay = "m-replay", live = if (rv$armed) "m-armed" else "m-disarmed")
     txt <- switch(run_mode, paper = "PAPER", replay = "REPLAY · PAPER", live = if (rv$armed) "LIVE · ARMED" else "LIVE · DISARMED")
-    span(class = paste("badge-mode", cls), txt)
+    tagList(span(class = paste("badge-mode", cls), txt), if (rv$one_click) span(class = "badge-mode m-oneclick", "ONE-CLICK"))
   })
   output$budget <- renderUI({
     o <- rv$orders
@@ -778,7 +822,7 @@ server <- function(input, output, session) {
       tags$tr(tags$td("Total"), tags$td(f(i$total_model, "%.1f")), tags$td(f(dec$lines[["total"]], "%.1f")), tags$td(f(now[["total"]], "%.1f"))))
   })
   output$orders <- renderUI({
-    dec <- rv$dec; rv$open
+    dec <- rv$dec; rv$open; rv$redraw; one <- rv$one_click
     if (is.null(dec)) return(div(h5("Orders"), div(class = "sub", "Nothing yet: orders appear at the next stoppage.")))
     i <- dec$info
     head <- sprintf("Orders at %s %s, %s (%s): seen %.0f s after it happened, worked out in %.1f s",
@@ -792,8 +836,10 @@ server <- function(input, output, session) {
     rows <- lapply(seq_len(nrow(dec$rows)), function(j) {
       r <- dec$rows[j]; why <- why_not(dec, r); n <- row_count(r)
       btn <- if (why == "") tags$button(class = paste("btn btn-sm", if (run_mode == "live") "btn-danger" else "btn-primary"),
-        onclick = sprintf("Shiny.setInputValue('place', {row: %d, key: '%s', n: Math.random()}, {priority: 'event'})", r$row, dec$key),
-        if (r$action == "BUY") sprintf("Buy %d", n) else sprintf("Sell %d", n)) else span(class = "why", why)
+        # one-click: the button goes dead at once, so a second click can't queue another order
+        onclick = sprintf("%sShiny.setInputValue('place', {row: %d, key: '%s', n: Math.random()}, {priority: 'event'})",
+                          if (one) "this.disabled = true; this.textContent = 'Sending...'; " else "", r$row, dec$key),
+        sprintf("%s %d%s", if (r$action == "BUY") "Buy" else "Sell", n, if (one) " now" else "")) else span(class = "why", why)
       tags$tr(tags$td(span(class = tolower(r$action), r$action)), tags$td(r$bet),
               tags$td(if (r$action == "BUY") sprintf("%d of %d", n, r$n) else r$n),
               tags$td(sprintf("%.0f¢", 100 * if (r$action == "BUY") r$price else 1 - r$price)),
@@ -804,6 +850,8 @@ server <- function(input, output, session) {
     div(h5(head), uiOutput("orders_timer"), recheck,
         tags$table(class = "t", tags$tr(tags$th(""), tags$th("Bet"), tags$th("Contracts"), tags$th("Price"), tags$th("Model"),
                                         tags$th("Edge"), tags$th("Cost"), tags$th("")), rows),
+        if (one) div(class = "why", style = "margin-top: 8px; color: #b45309;",
+                     "One-click orders are on: a Buy or Sell button sends its order as soon as it's clicked."),
         div(class = "why", style = "margin-top: 8px;",
             "Contracts are cut to fit the spending limits. Price: the most you pay per contract (buys) or the least you take (sells); fees on top."),
         near_table(dec$near[why != ""], rv$su$game))
