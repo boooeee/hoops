@@ -511,7 +511,10 @@ server <- function(input, output, session) {
                    rows = order_rows(r$orders, rv$q, su$game$htm, su$game$atm),
                    t_made = now_t(), until = w$until, brk = w$brk, seen_after = seen_after, late = late,
                    expired = FALSE, secs = as.numeric(difftime(Sys.time(), t0, units = "secs")),
-                   lines = line_now(rv$q), last = last, n_checks = if (is.null(prev)) 1 else prev$n_checks + 1)
+                   lines = line_now(rv$q), last = last, n_checks = if (is.null(prev)) 1 else prev$n_checks + 1,
+                   # new every time orders are worked out, so their Kalshi order ids are too, even for a
+                   # stoppage worked out again after a restart or a reload of the page
+                   uid = substr(gsub("-", "", uuid::UUIDgenerate()), 1, 8))
     message(sprintf("%s  %s %d at %s %d  Q%d %s  %s: seen %.0f s after, %d order rows%s%s", format(Sys.time(), "%H:%M:%S"),
                     su$game$atm, last$scoreAway, su$game$htm, last$scoreHome, last$period, r$info$clock, stop_what(act),
                     seen_after, nrow(rv$dec$rows), if (late) " (late: locked)" else "", if (!is.null(prev)) " (rechecked)" else ""))
@@ -699,7 +702,9 @@ server <- function(input, output, session) {
                       t_stop = format(as.POSIXct(dec$last$t, origin = "1970-01-01"), "%Y-%m-%d %H:%M:%S"),
                       seen_after = round(dec$seen_after, 1), click_after = round(now_t() - dec$t_made, 1), checks = dec$n_checks)
     if (run_mode == "live") {
-      cid <- sprintf("possim-%s-%d", gsub(" ", "-", dec$key), r$row)     # e.g. possim-0022600027-456-r1-2
+      # one id per button: a second send of the same button is refused by Kalshi as a duplicate,
+      # e.g. possim-0022600190-187953201-3f9a1c2e-1
+      cid <- sprintf("possim-%s-%.0f-%s-%d", dec$gid, dec$stop_order, dec$uid, r$row)
       res <- tryCatch(kalshi_order(order_body(r$ticker, r$outcome, n, r$price, cid, reduce_only = r$action == "SELL")),
                       error = function(e) list(ok = FALSE, status = NA, error = conditionMessage(e)))
       if (isTRUE(res$ok)) {
