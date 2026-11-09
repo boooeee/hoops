@@ -41,8 +41,11 @@ live_settings <- list(
   min_edge    = 0.02,              # model probability minus fee-inclusive price
   price_range = c(0.05, 0.95),     # only buy at prices in this range
   max_order   = 100,               # most to spend on one market at one stoppage
-  max_seen    = 60,                # skip a stoppage seen this many seconds after it happened (the
-                                   # backtest's quotes were 20-80 s after; the feed can stall for minutes)
+  # skip a stoppage seen more than this many seconds after it happened (the feed can stall for
+  # minutes). Timeouts last longer: 75 s, or about 2:45 for a TV timeout. In 2025-26, 96% of
+  # timeouts had no new play 90 s after they were called, and the backtest's timeout bets on
+  # quotes 60-90 s after one returned +4.6% (+-1.0), as earlier ones did (+5.8%, +4.8%).
+  max_seen    = c(timeout = 90, other = 60),
   # quarters to bet each kind of market in (5 = overtime). In the 2025-26 backtest, win
   # markets made money only in Q4 and totals only from Q3; spreads made money in every
   # quarter. Positions already held count either way.
@@ -66,6 +69,12 @@ is_stoppage <- function(a) {
 # what stopped play: the latest action that isn't a substitution or a note
 admin_only <- c("substitution", "memo")
 stop_what <- function(act) act[!actionType %in% admin_only][.N, actionType]
+# how late stoppage `last` can be seen and still be bet: max_seen by kind (or one number for all)
+seen_limit <- function(last, s) {
+  m <- s$max_seen
+  if (is.null(names(m))) return(m[[1]])
+  m[[if (last$actionType %in% names(m)) last$actionType else "other"]]
+}
 
 # ── The ledger: cash and positions for one game ──────────────────────────────
 read_ledger <- function(date = Sys.Date()) {
@@ -126,7 +135,7 @@ decide <- function(su, act, quotes, book, s = live_settings) {
   near <- rbind(q[, .(ticker, kind, x, yes_over, side = "yes", price = yes_ask, p_win = pm)],
                 q[, .(ticker, kind, x, yes_over, side = "no", price = no_ask, p_win = 1 - pm)])[!is.na(price) & price > 0 & price < 1]
   near[, edge := p_win - price - kalshi_fee * price * (1 - price)]
-  near[, why := fcase(!kind %in% bet_kinds, sprintf("%s not bet in this quarter", kind),
+  near[, why := fcase(!kind %in% bet_kinds, sprintf("%s not bet in this quarter", fifelse(kind == "game", "win market", kind)),
                       price < s$price_range[1] | price > s$price_range[2], "price outside the range",
                       edge <= s$min_edge, sprintf("edge under %.0f¢", 100 * s$min_edge),
                       ticker %in% o$ticker, "", default = "Kelly sized it to nothing")]
@@ -181,8 +190,10 @@ game_setup <- function(row, cache) {
   if (!is.null(db) && nrow(db) && !is.na(db$total[1]) && db$total[1] > 150 && !(db$total[1] == 200.52 && db$line[1] == -3.25)) {
     gm[, `:=`(line = db$line[1], total = db$total[1])]; src <- "gms"
   } else {
-    l <- kalshi_lines(gm, t = if (Sys.time() > row$tip_t) row$tip_t else NULL)
-    gm[, `:=`(line = round(l[["line"]], 2), total = round(l[["total"]], 2))]; src <- "Kalshi before the tip"
+    tipped <- Sys.time() > row$tip_t
+    l <- kalshi_lines(gm, t = if (tipped) row$tip_t else NULL)
+    gm[, `:=`(line = round(l[["line"]], 2), total = round(l[["total"]], 2))]
+    src <- if (tipped) "Kalshi at the tip" else sprintf("Kalshi at %s, before the tip", format(Sys.time(), "%H:%M"))
   }
   if (is.na(gm$line) || is.na(gm$total)) stop("no line and total, from gms or Kalshi")   # retried on the next poll
   su <- setup_game(gm)
@@ -223,7 +234,7 @@ run_live <- function(teams = NULL, s = live_settings) {
       done <- c(done, key)
       t0 <- Sys.time()
       seen_after <- as.numeric(t0) - last$t
-      if (!is.na(seen_after) && seen_after > s$max_seen) {
+      if (!is.na(seen_after) && seen_after > seen_limit(last, s)) {
         cat(sprintf("\n%s  %s %d at %s %d  Q%d %s  %s seen %.0f s after it happened: skipped\n", format(t0, "%H:%M:%S"),
                     g$atm, last$scoreAway, g$htm, last$scoreHome, last$period, sprintf("%d:%02d", last$tr %/% 60, last$tr %% 60),
                     stop_what(act), seen_after))

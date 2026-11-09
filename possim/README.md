@@ -166,8 +166,17 @@ Rscript bet_game.R 2026-01-28 IND    # one game from the backtest (no arguments:
   when the console starts (the model anchored to its line and total, about 10 seconds a game),
   so switching is quick. A game's orders come back if you switch away and return while its
   stoppage lasts.
-- **Which markets:** unlike `bet_live.R`, it bets every kind of market in every quarter.
-  The quarter rules came from the same backtest they were judged on.
+- **Anchoring at the tip:** a game with no gms line is anchored to Kalshi's prices. If it was set
+  up before the tip, it's anchored again once the feed shows the first quarter starting, to
+  Kalshi's prices 30 seconds before that. If the console misses the start, it uses the scheduled
+  time instead, 20 minutes after it. The real tip comes a median 11 minutes after the scheduled
+  time. Over those minutes in 2025-26, 9% of lines and 19% of totals moved half a point or more.
+  The console's log shows each re-anchoring with the old line and total.
+- **Which markets** (`bet_when` in `console_settings`): spreads in every quarter, totals from
+  Q3, win markets from Q4, as in `bet_live.R`. That rule was picked on the 2025-26 backtest, and
+  this season's first games (2026-10-20 to 11-04, not used to pick it) agree with it:
+  first-half totals returned −0.3% in 2025-26 and −4.0% this season, against about +14% for Q4
+  totals in both.
 - **At each stoppage** it lists the orders Kelly wants, each with a button. A click opens a
   confirmation, and nothing is sent until it's confirmed.
 - **Two boxes in the bar** trade a gate for speed, for when prices move too fast. Both start
@@ -185,7 +194,8 @@ Rscript bet_game.R 2026-01-28 IND    # one game from the backtest (no arguments:
   sells. Orders are cut to fit. Kelly sizes against a $500 bankroll a game.
 - **When buttons lock:** once play resumes in the feed; at an ordinary stoppage, 180 seconds after
   the console first sees it (in any game, so picking a game late doesn't restart the clock), or
-  straight away if it reached the feed more than 60 seconds late; at a
+  straight away if it reached the feed late: more than 90 seconds for a timeout, 60 for
+  anything else; at a
   break between periods, 2 minutes after the period ended (14 at halftime), however late it
   was seen. The feed runs 20–60 seconds behind, so watch the game too. **Recheck prices**
   works a stoppage's orders out again from Kalshi's latest prices, for long breaks.
@@ -205,6 +215,75 @@ Rscript bet_game.R 2026-01-28 IND    # one game from the backtest (no arguments:
   `~/Dropbox/kalshi`).
 - **Kalshi's API:** orders use its V2 endpoint (`POST /portfolio/events/orders`, side `bid` to
   buy YES and `ask` to sell YES, priced in YES terms).
+
+### The bot: one game, no clicks ([bot.R](bot.R))
+
+A separate page that bets one game by itself. At each stoppage it works out the same orders the
+console would show, and sends them: sells first, then the best edges. It can only be started
+from this page.
+
+```bash
+Rscript bot.R                          # paper: tonight's games, orders filled on paper
+Rscript bot.R replay 0022600174 10     # a past game against its saved Kalshi minutes, at 10x
+Rscript bot.R live                     # real orders, once launched in the page
+```
+
+It opens http://127.0.0.1:8770. Pick a game; the model is anchored to it (10–30 seconds). Check
+the limits, then launch. Live, the launch dialog lists every limit, and the bot starts only after
+you type the spend cap back.
+
+- **Limits** (the page starts with these, from `bot_settings` in [bot_lib.R](bot_lib.R)):
+
+  | | Default | |
+  |---|---|---|
+  | Spend cap | $1,000 | the most the bot spends on the game, net of sells. Counted from Kalshi's positions and the bot's log, whichever is more. Never above `ceiling` ($1,000), which only `bot_lib.R` can raise |
+  | Kelly bankroll | $1,000 | what Kelly sizes against, less what the game has cost so far |
+  | Per order | $60 | fee included; also Kelly's most per market at a stoppage |
+  | Per stoppage | $150 | |
+  | Loss stop | $400 | stops when the game's positions, at Kalshi's mids, are down this much since launch |
+  | Fixed | | 12 orders a stoppage, 40 a minute, 1,000 contracts an order |
+
+  The model's side is the backtest's best strategy: quarter Kelly, 2¢ minimum edge, prices 5–95¢,
+  spreads all game, totals from Q3, win markets from Q4. In 2025-26 that made $49 a game on a
+  $1,000 bankroll, buying at the ask with every order filled. Live, about half of orders fill.
+- **How it bets:**
+  - One set of orders per dead ball, with no rechecks. On Nov 8, rechecked orders showed no edge.
+  - Orders go within 15 seconds of being worked out.
+  - Stoppages count only if seen in time, as in the console: 90 seconds for a timeout, 60 for
+    anything else.
+  - A game anchored to Kalshi before the tip is anchored again at the real tip. The bot doesn't
+    bet until that's done.
+  - Every order is a limit at the price seen, immediate-or-cancel. Sells are reduce-only.
+- **Live checks:** the first order is 1 contract. Nothing more goes until Kalshi's positions show
+  it. At every stoppage after that, Kalshi's positions must equal those at launch plus the bot's
+  own fills.
+- **It stops itself:**
+  - on any failed order;
+  - on a position mismatch (someone else traded the game: the app, the console);
+  - on the loss stop;
+  - if positions can't be read at three stoppages running;
+  - on any error in its own code;
+  - when the game ends;
+  - when its page is closed or reloaded.
+  Positions stay as they are when it stops, and nothing is left on the book.
+- **Stopping it yourself:** the **Stop the bot** button, or from any terminal:
+
+  ```bash
+  touch ~/Dropbox/Nba/playbyplay/possim/live/STOP_BOT
+  ```
+
+  The bot checks for that file before every order. It won't launch while the file is there, so
+  delete it afterwards.
+- **One bot at a time:** a running bot holds `live/bot.lock`. While it runs, the console sends no
+  orders in the bot's game; other games are unaffected. The console's nightly limit doesn't count
+  the bot's spending, and the bot's cap doesn't count the console's other games.
+- **Keep the Mac awake:** the bot runs only while R and the page do. If the Mac sleeps, nothing
+  is sent until it wakes. Plug it in, and run `caffeinate -i` in a terminal for the evening.
+- **Logs:** `live/<date>_bot_orders.csv` (the console's columns, note `bot`) and
+  `live/<date>_bot_events.csv` (each launch, bet, skip and stop, with the reason).
+- **Tests:** `Rscript bot_test.R` drives the bot in live mode through a replayed game. It runs
+  against a stand-in for Kalshi that can refuse or lose an order, and checks every guardrail
+  above. Nothing is sent; everything it writes is in temporary files.
 
 **Turning a stoppage into a state.**
 - **Quarter break:** the next period's first possession.
@@ -274,8 +353,13 @@ Buying at the ask, $1,000 a game, 95% intervals from resampling games. Saved as
     seconds after they happened; 47% arrived within 20 seconds and 63% within 60.
     The feed also stopped updating twice, for 11 minutes and for 4½, and some
     requests hung for 60 seconds. So the tool skips any stoppage it sees more than
-    `max_seen` (60) seconds after it happened, and gives up on a read after 8
-    seconds.
+    `max_seen` seconds after it happened, and gives up on a read after 8
+    seconds. `max_seen` is 90 seconds for a timeout and 60 for anything else.
+    Timeouts last 75 seconds, or about 2:45 for a TV timeout. In 2025-26, 96% of
+    timeouts had no new play 90 seconds after they were called. The backtest's
+    timeout bets on quotes 60–90 seconds after a timeout returned +4.6% (±1.0),
+    about the same as earlier ones. Free throws come sooner: the first one comes
+    a median 28 seconds after the foul.
 - **Against the market's mid, where it's 1–2¢ wide:**
   - Kalshi is slightly better than the model in Q1–Q3 on all three kinds, and
     on win markets in every quarter.
